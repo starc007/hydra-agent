@@ -6,5 +6,6 @@ node_modules
 .wrangler
 dist
 docs
+tsconfig.tsbuildinfo
 .DS_Store
 *.local
