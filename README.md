@@ -139,6 +139,27 @@ npx wrangler d1 create hydra
 npm run db:migrate:local
 ```
 
+### 4b. (optional) Helper scripts
+
+If you need to mint a new v4 LP position or list the ones you already own:
+
+```bash
+cd packages/worker
+
+# enumerate your v4 LP NFTs (auto-uses wallet from .dev.vars)
+npm run position:list
+
+# mint a new position (Unichain Sepolia, ERC20-ERC20 pair)
+npm run position:create -- \
+  --tokenA 0x... --tokenB 0x... \
+  --fee 3000 --tickSpacing 60 \
+  --tickLower -300 --tickUpper 300 \
+  --amount0 1000000000000000000 --amount1 1000000 \
+  [--initialPriceX96 79228162514264337593543950336]   # only if pool not yet initialized
+```
+
+`position:create` handles pool initialization (if needed), Permit2 setup (idempotent), and prints the new `tokenId` you should paste into `wrangler.toml`.
+
 ### 5. Run
 
 ```bash
