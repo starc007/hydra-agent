@@ -1,0 +1,17 @@
+{
+  "name": "hydra-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev:worker": "npm --prefix packages/worker run dev",
+    "deploy:worker": "npm --prefix packages/worker run deploy",
+    "dev:dashboard": "npm --prefix packages/dashboard run dev",
+    "deploy:dashboard": "npm --prefix packages/dashboard run deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "wrangler": "^3.90.0"
+  }
+}
