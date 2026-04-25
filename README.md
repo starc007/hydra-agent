@@ -41,7 +41,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
                 ──────────────────────────────────────────
                 Uniswap API ─ pool state every 10s
                 viem ───────── tx submit on Unichain Sepolia
-                Anthropic ──── Claude Sonnet 4.6 (cached)
+                LLM ────────── Anthropic / Google / OpenAI (configurable)
                 Telegram ───── escalation messages
 ```
 
@@ -49,7 +49,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
 
 - **Price** — polls the Uniswap API every 10s. Emits `PRICE_UPDATE` and `OUT_OF_RANGE` when the tick crosses the position bounds.
 - **Risk** — computes IL from `(priceEntry, priceNow)` each tick. Emits `IL_THRESHOLD_BREACH` / `POSITION_HEALTHY` / `FEE_HARVEST_READY`.
-- **Strategy** — listens for trigger events (`OUT_OF_RANGE`, `IL_THRESHOLD_BREACH`, etc.), passes recent context to Claude Sonnet 4.6 with prompt caching + the `recommend_action` tool, emits a structured `STRATEGY_RECOMMENDATION`.
+- **Strategy** — listens for trigger events (`OUT_OF_RANGE`, `IL_THRESHOLD_BREACH`, etc.), passes recent context to the configured LLM (Anthropic / Google / OpenAI) with prompt caching (Anthropic only) via `generateObject`, emits a structured `STRATEGY_RECOMMENDATION`.
 - **Coordinator** — applies deterministic rules (min confidence, supporting signal, daily tx cap, cooldown). Either emits `APPROVED` or `ESCALATE`.
 - **Execution** — the only agent with access to the wallet. On `APPROVED` it submits a tx via viem and emits `TX_SUBMITTED` → `TX_CONFIRMED` (or `TX_FAILED`).
 
@@ -59,7 +59,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
 |---|---|
 | Agent runtime | Cloudflare Workers + 1 Durable Object (`HydraDO`) |
 | Event bus | Tiny typed `EventEmitter` (no `node:events`) |
-| LLM | `claude-sonnet-4-6` via `@anthropic-ai/sdk` with ephemeral prompt caching |
+| LLM | Anthropic / Google / OpenAI via Vercel AI SDK (default `claude-sonnet-4-6`; switch via `LLM_PROVIDER`) — prompt caching on Anthropic |
 | Chain interaction | `viem` + `@uniswap/v4-sdk` + Uniswap Pool API |
 | Network | Unichain Sepolia (chainId 1301) |
 | Storage | D1 (SQLite) — events + decisions persistence |
