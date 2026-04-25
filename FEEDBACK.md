@@ -19,9 +19,9 @@ as we integrate the Uniswap API and v4 SDK.
 
 ## v4 SDK ergonomics
 
-- The biggest friction was building the `modifyLiquidities` call for rebalance / harvest / exit. The path from `Position` / `Pool` objects to encoded calldata was not obvious from the README, and signature differences between minor versions added uncertainty.
-- For now the Execution Agent ships a minimal ETH self-transfer so that the dashboard shows a real on-chain confirmation per approved action. The agent coordination story is unaffected — only the encoded call is a placeholder pending a cleaner v4 encoding path.
-- A `buildRebalance(poolKey, tokenId, newRange, recipient)` helper that returned `{ to, data, value }` ready for `sendTransaction` would have unblocked us in a single afternoon.
+- The biggest friction is building the `modifyLiquidities` calldata: the path from `Position` / `Pool` objects to the encoded `(actions, params[])` is not surfaced by the v4 SDK in any obvious way. We hand-rolled it from the periphery source — see `packages/worker/src/chain/actions.ts`. A `buildRebalance(poolKey, tokenId, newRange, recipient)` helper that returned `{ to, data, value }` would have saved a half day.
+- `PositionInfo` is bit-packed in `getPoolAndPositionInfo` — the SDK should expose `decodePositionInfo(info)` returning `{ tickLower, tickUpper, hasSubscriber, poolId }`. We re-implemented this at `packages/worker/src/chain/position.ts:readPositionMetadata`.
+- Fees-owed for a position requires reading both `StateView.getFeeGrowthInside(poolId, ...)` AND `StateView.getPositionInfo(poolId, positionManager, ...)` and computing `(insideNow - insideLast) * liquidity / Q128` with care for unchecked subtraction wrap. A first-class `getFeesOwed(positionManager, tokenId)` view (or SDK helper) would remove a lot of footgun surface.
 
 ## Endpoint coverage
 

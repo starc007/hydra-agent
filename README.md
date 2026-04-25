@@ -124,6 +124,7 @@ cp .dev.vars.example packages/worker/.dev.vars
 
 In `packages/worker/wrangler.toml`:
 - `POOL_ID` and `POSITION_MANAGER` — the v4 pool you want to manage on Unichain Sepolia (chainId 1301).
+- `STATE_VIEW` — the v4 `StateView` lens contract address on Unichain Sepolia (used for fee reads).
 - `TOKEN_ID` — your LP NFT id from PositionManager.
 - `POSITION_TICK_LOWER` / `POSITION_TICK_UPPER` — your position's range. The DO seeds `range` from these on first boot; afterwards the stored value wins (settable at runtime via `POST /admin/range`).
 
