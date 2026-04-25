@@ -204,7 +204,3 @@ npm run deploy
 - **Cloudflare-native** — one Durable Object, one D1, one Pages deployment. No long-running boxes, no queues to babysit, free tier covers the demo.
 
 See `FEEDBACK.md` for our notes on the Uniswap API + v4 SDK developer experience.
-
-## Plan & history
-
-The full implementation plan lives at `docs/superpowers/plans/2026-04-25-hydra.md`.
