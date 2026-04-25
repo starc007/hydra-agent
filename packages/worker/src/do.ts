@@ -5,7 +5,7 @@ import { Bus } from './bus';
 import { newEvent } from './ids';
 import type { HydraEvent } from './events';
 import { attachArchiver, listEvents, listDecisions, writeDecision } from './store/d1';
-import { fetchPoolState, type PoolState } from './chain/pool';
+import { fetchPoolState, priceFromSqrtX96, type PoolState } from './chain/pool';
 import { makeClients } from './chain/client';
 import { ClaudeClient } from './llm/claude';
 import { PriceAgent } from './agents/price';
@@ -24,6 +24,7 @@ export class HydraDO extends DurableObject<Env> {
   private booted = false;
   private range: Range = { tickLower: -887200, tickUpper: 887200 };
   private latestPool?: PoolState;
+  private entryPrice?: number;
   private agents: {
     price: PriceAgent;
     risk: RiskAgent;
@@ -48,19 +49,33 @@ export class HydraDO extends DurableObject<Env> {
     const stored = await this.ctx.storage.get<Range>('range');
     if (stored) this.range = stored;
 
+    this.entryPrice = await this.ctx.storage.get<number>('entryPrice');
+
     const { publicClient, walletClient, account } = makeClients(this.cfg);
     const claude = new ClaudeClient(this.cfg.ANTHROPIC_API_KEY);
 
+    const priceOf = (s: PoolState) => priceFromSqrtX96(s.sqrtPriceX96, s.token0.decimals, s.token1.decimals);
     const price = new PriceAgent(this.bus, {
       range: () => this.range,
       fetcher: async () => {
         this.latestPool = await fetchPoolState(this.cfg);
+        if (this.entryPrice == null) {
+          this.entryPrice = priceOf(this.latestPool);
+          await this.ctx.storage.put('entryPrice', this.entryPrice);
+        }
         return this.latestPool;
       },
+      priceOf,
     });
     const risk = new RiskAgent(this.bus, {
       thresholdPct: this.cfg.IL_THRESHOLD_PCT,
-      sample: async () => ({ priceEntry: 1, priceNow: 1, feesEarnedUsd: 0 }),
+      sample: async () => {
+        const pool = this.latestPool ?? (await fetchPoolState(this.cfg));
+        this.latestPool = pool;
+        const priceNow = priceFromSqrtX96(pool.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
+        const priceEntry = this.entryPrice ?? priceNow;
+        return { priceEntry, priceNow, feesEarnedUsd: 0 };
+      },
     });
     const strategy = new StrategyAgent(this.bus, {
       client: claude,
@@ -163,7 +178,7 @@ export class HydraDO extends DurableObject<Env> {
     await this.boot();
     const events = await listEvents(this.env.DB, 100);
     const decisions = await listDecisions(this.env.DB, 50);
-    return { range: this.range, latestPool: this.latestPool, events, decisions };
+    return { range: this.range, entryPrice: this.entryPrice, latestPool: this.latestPool, events, decisions };
   }
 
   async setRange(range: Range): Promise<void> {

@@ -6,6 +6,7 @@ import type { AgentName } from '../events';
 export type PriceAgentDeps = {
   range: () => { tickLower: number; tickUpper: number };
   fetcher: () => Promise<PoolState>;
+  priceOf?: (s: PoolState) => number;
 };
 
 export class PriceAgent extends BaseAgent {
@@ -20,10 +21,11 @@ export class PriceAgent extends BaseAgent {
     try { s = await this.deps.fetcher(); }
     catch (err) { console.error('[price] fetch failed', err); return; }
 
+    const price = this.deps.priceOf ? this.deps.priceOf(s) : 0;
     this.emit({
       source: 'price',
       type: 'PRICE_UPDATE',
-      payload: { tick: s.tick, sqrtPriceX96: s.sqrtPriceX96.toString(), price: 0 },
+      payload: { tick: s.tick, sqrtPriceX96: s.sqrtPriceX96.toString(), price },
     });
 
     const { tickLower, tickUpper } = this.deps.range();
