@@ -1,8 +1,13 @@
 declare const process: { env: Record<string, string | undefined>; argv: string[]; exit: (code: number) => never; cwd: () => string };
 
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { createPublicClient, createWalletClient, http, type Address, type Chain } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
+const WORKER_PKG_DIR = resolve(SCRIPTS_DIR, '..');
 
 export const UNICHAIN_SEPOLIA_ADDRESSES = {
   poolManager:     '0x00b036b58a818b1bc34d502d3fe730db729e62ac' as Address,
@@ -36,7 +41,8 @@ function parseDevVars(path: string): Record<string, string> {
 }
 
 export function loadEnv(): { privateKey: `0x${string}`; rpcUrl: string } {
-  const vars = parseDevVars(`${process.cwd()}/packages/worker/.dev.vars`);
+  // Look for .dev.vars next to the worker package, regardless of cwd at invocation.
+  const vars = parseDevVars(resolve(WORKER_PKG_DIR, '.dev.vars'));
   const merged: Record<string, string | undefined> = { ...vars, ...process.env };
   const pk = merged.PRIVATE_KEY;
   if (!pk || !pk.startsWith('0x')) {
