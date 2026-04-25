@@ -3,8 +3,22 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { privateKeyToAccount } from 'viem/accounts';
-import { register } from '../../lib/api';
+import { register, previewPosition, type PreviewPosition } from '../../lib/api';
 import { saveSession } from '../../lib/storage';
+
+function normalizePrivateKey(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('0x') || trimmed.startsWith('0X')) {
+    return '0x' + trimmed.slice(2).toLowerCase();
+  }
+  if (/^[0-9a-fA-F]+$/.test(trimmed)) return '0x' + trimmed.toLowerCase();
+  return trimmed;
+}
+
+function shortAddress(a: string): string {
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
 
 export default function SetupPage() {
   const router = useRouter();
@@ -15,8 +29,11 @@ export default function SetupPage() {
   const [wallet, setWallet] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<PreviewPosition | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
-  // Derive wallet from private key
+  // Derive wallet from PK
   useEffect(() => {
     if (!privateKey || !privateKey.startsWith('0x') || privateKey.length !== 66) {
       setWallet('');
@@ -30,6 +47,30 @@ export default function SetupPage() {
     }
   }, [privateKey]);
 
+  // Debounced preview when wallet + tokenId are both set
+  useEffect(() => {
+    if (!wallet || !tokenId) {
+      setPreview(null);
+      setPreviewError(null);
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError(null);
+    const handle = setTimeout(async () => {
+      try {
+        const p = await previewPosition(wallet, tokenId);
+        setPreview(p);
+        setPreviewError(null);
+      } catch (err) {
+        setPreview(null);
+        setPreviewError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setPreviewLoading(false);
+      }
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [wallet, tokenId]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -42,12 +83,7 @@ export default function SetupPage() {
         telegramChatId: telegramChatId || undefined,
         stableCurrency: stableCurrency || undefined,
       });
-      saveSession({
-        doId: res.doId,
-        sessionToken: res.sessionToken,
-        wallet,
-        tokenId,
-      });
+      saveSession({ doId: res.doId, sessionToken: res.sessionToken, wallet, tokenId });
       router.push('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -80,13 +116,13 @@ export default function SetupPage() {
       </div>
 
       <form onSubmit={onSubmit} className="card p-6 space-y-5">
-        <Field label="Private key" hint="Hot wallet only. Derived address shown below.">
+        <Field label="Private key" hint="Hot wallet only. 0x prefix added automatically.">
           <input
             type="password"
-            placeholder="0x…"
+            placeholder="hex…"
             className="input"
             value={privateKey}
-            onChange={(e) => setPrivateKey(e.target.value.trim())}
+            onChange={(e) => setPrivateKey(normalizePrivateKey(e.target.value))}
             required
           />
         </Field>
@@ -95,16 +131,79 @@ export default function SetupPage() {
           <div className="input font-mono text-xs text-muted select-all">{wallet || '—'}</div>
         </Field>
 
-        <Field label="Token ID" hint="Your Uniswap v4 LP NFT id from PositionManager.">
+        <Field
+          label="Token ID"
+          hint={
+            <>
+              <a
+                href="https://app.uniswap.org/positions/v4?chain=unichain_sepolia"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand underline-offset-2 hover:underline"
+              >
+                Where do I find this? ↗
+              </a>
+            </>
+          }
+        >
           <input
             type="text"
             inputMode="numeric"
-            placeholder="e.g. 7466"
+            placeholder="e.g. 7470"
             className="input"
             value={tokenId}
             onChange={(e) => setTokenId(e.target.value.trim())}
             required
           />
+        </Field>
+
+        {/* Preview card */}
+        {previewLoading && (
+          <div className="card-elevated p-3 text-xs text-subtle">Validating position…</div>
+        )}
+        {previewError && (
+          <div className="card p-3 border-err/30 bg-err/5">
+            <p className="text-xs text-err">{previewError}</p>
+          </div>
+        )}
+        {preview && !previewLoading && !previewError && (
+          <div className="card-elevated p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="pill bg-accent/15 text-accent border-accent/20">✓ position validated</span>
+                <span className="font-mono text-xs text-ink">
+                  {preview.token0.symbol} / {preview.token1.symbol}
+                </span>
+              </div>
+              <span className="text-[11px] text-subtle font-mono">fee {preview.poolKey.fee / 10_000}%</span>
+            </div>
+            <div className="text-xs text-muted font-mono">
+              range {preview.tickLower} … {preview.tickUpper}
+            </div>
+          </div>
+        )}
+
+        <Field
+          label="Stable currency"
+          hint="Used to convert fees into USD. Pick whichever side of the pool is the USD-pegged token."
+        >
+          {preview ? (
+            <select
+              className="input"
+              value={stableCurrency}
+              onChange={(e) => setStableCurrency(e.target.value)}
+            >
+              <option value="">Auto — treat token1 ({preview.token1.symbol}) as stable</option>
+              <option value={preview.token0.address}>
+                {preview.token0.symbol} ({shortAddress(preview.token0.address)})
+              </option>
+              <option value={preview.token1.address}>
+                {preview.token1.symbol} ({shortAddress(preview.token1.address)})
+              </option>
+            </select>
+          ) : (
+            <div className="input text-xs text-subtle">Enter a valid token id to choose.</div>
+          )}
         </Field>
 
         <Field label="Telegram chat ID" hint="Optional. For escalation messages. Find via @userinfobot.">
@@ -118,16 +217,6 @@ export default function SetupPage() {
           />
         </Field>
 
-        <Field label="Stable currency address" hint="Optional. The pool's USD-stable token address (token0 or token1) for fee USD conversion. Leave empty to default to token1.">
-          <input
-            type="text"
-            placeholder="0x…"
-            className="input"
-            value={stableCurrency}
-            onChange={(e) => setStableCurrency(e.target.value.trim())}
-          />
-        </Field>
-
         {error && (
           <div className="card p-3 border-err/30 bg-err/5">
             <p className="text-xs text-err">{error}</p>
@@ -135,7 +224,11 @@ export default function SetupPage() {
         )}
 
         <div className="flex gap-3 pt-2">
-          <button type="submit" className="btn-primary flex-1" disabled={!wallet || !tokenId || !privateKey || submitting}>
+          <button
+            type="submit"
+            className="btn-primary flex-1"
+            disabled={!wallet || !tokenId || !privateKey || !preview || submitting}
+          >
             {submitting ? 'Registering…' : 'Register & start monitoring'}
           </button>
         </div>
@@ -144,10 +237,10 @@ export default function SetupPage() {
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, hint, children }: { label: string; hint?: React.ReactNode; children: React.ReactNode }) {
   return (
     <label className="block">
-      <div className="flex items-baseline justify-between mb-1.5">
+      <div className="flex items-baseline justify-between mb-1.5 gap-3">
         <span className="label">{label}</span>
         {hint && <span className="text-[10px] text-subtle">{hint}</span>}
       </div>
