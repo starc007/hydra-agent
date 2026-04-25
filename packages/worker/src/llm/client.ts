@@ -9,7 +9,7 @@ export type StrategyOutput = RecommendOutput;
 
 const DEFAULTS = {
   anthropic: 'claude-sonnet-4-6',
-  google: 'gemini-2.5-pro-preview-05-06',
+  google: 'gemini-3.1-pro-preview',
   openai: 'gpt-4o',
 } as const;
 

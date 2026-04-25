@@ -25,7 +25,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
                 │   └──────┬──────┘   │
                 │          │          │
                 │  Price ─┤├─ Risk    │
-                │           ├ Strategy (Claude)
+                │           ├ Strategy (LLM)
                 │           ├ Coordinator
                 │           └ Execution
                 └────┬────────────┬───┘
@@ -83,7 +83,7 @@ hydra-agent/
 │   │   │   ├── config.ts           # zod-validated env -> Config
 │   │   │   ├── agents/{base,price,risk,strategy,coordinator,execution}.ts
 │   │   │   ├── chain/{client,pool,position,il,plan,submit}.ts
-│   │   │   ├── llm/{prompt,claude}.ts
+│   │   │   ├── llm/{prompt,client}.ts
 │   │   │   ├── store/d1.ts
 │   │   │   └── bot/telegram.ts
 │   │   ├── migrations/0001_init.sql
@@ -188,7 +188,7 @@ npm run deploy
    ```
 3. Within one alarm tick (≤10s):
    - Price agent emits `OUT_OF_RANGE`
-   - Strategy agent calls Claude → emits `STRATEGY_RECOMMENDATION` with `REBALANCE`
+   - Strategy agent calls the configured LLM → emits `STRATEGY_RECOMMENDATION` with `REBALANCE`
    - Coordinator emits `APPROVED`
    - Execution agent emits `TX_SUBMITTED` → `TX_CONFIRMED`
 4. Tx hash is visible at `https://sepolia.uniscan.xyz/tx/<hash>`.
