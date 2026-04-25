@@ -77,7 +77,7 @@ export class Coordinator extends BaseAgent {
       this.emit({
         source: 'coordinator',
         type: 'ESCALATE',
-        payload: { reason, recommendation: rec },
+        payload: { reason, correlatesTo: e.id, recommendation: rec },
       });
     }
   }

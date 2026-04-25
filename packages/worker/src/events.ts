@@ -45,7 +45,13 @@ export type Approved = BaseEvent & {
 };
 export type Escalate = BaseEvent & {
   type: 'ESCALATE'; source: 'coordinator';
-  payload: { reason: string; recommendation: StrategyRecommendation['payload'] };
+  payload: {
+    reason: string;
+    /** ID of the STRATEGY_RECOMMENDATION this escalation was raised for. Used as the key in
+     * Coordinator.pending and as the correlatesTo on the resulting HUMAN_DECISION. */
+    correlatesTo: string;
+    recommendation: StrategyRecommendation['payload'];
+  };
 };
 export type HumanDecision = BaseEvent & {
   type: 'HUMAN_DECISION'; source: 'bot';

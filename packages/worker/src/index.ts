@@ -1,6 +1,6 @@
 import type { Env } from './config';
 import { listEvents, listDecisions } from './store/d1';
-import { parseCallback, answerCallback } from './bot/telegram';
+import { parseCallback, answerCallback, resolveEscalationMessage } from './bot/telegram';
 export { HydraDO } from './do';
 
 function corsHeaders(env: Env): Record<string, string> {
@@ -63,12 +63,16 @@ export default {
       const update = await req.json();
       const parsed = parseCallback(update);
       if (parsed && env.TELEGRAM_BOT_TOKEN) {
+        const tgCfg = { token: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID ?? '' };
         await singleton(env).injectHumanDecision(parsed.decision, parsed.correlatesTo);
-        await answerCallback(
-          { token: env.TELEGRAM_BOT_TOKEN, chatId: env.TELEGRAM_CHAT_ID ?? '' },
-          parsed.cqId,
-          `Recorded ${parsed.decision}`,
-        );
+        await answerCallback(tgCfg, parsed.cqId, `Recorded ${parsed.decision}`);
+        if (parsed.chatId != null && parsed.messageId != null) {
+          await resolveEscalationMessage(tgCfg, {
+            chatId: parsed.chatId,
+            messageId: parsed.messageId,
+            decision: parsed.decision,
+          });
+        }
       }
       return Response.json({ ok: true });
     }
