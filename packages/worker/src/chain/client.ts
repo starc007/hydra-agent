@@ -1,6 +1,5 @@
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import type { Config } from '../config';
 
 export const unichainSepolia = {
   id: 1301,
@@ -10,9 +9,9 @@ export const unichainSepolia = {
   rpcUrls: { default: { http: ['https://sepolia.unichain.org'] } },
 } as const;
 
-export function makeClients(cfg: Config) {
-  const account = privateKeyToAccount(cfg.privateKey);
-  const transport = http(cfg.RPC_URL);
+export function makeClients(opts: { rpcUrl: string; privateKey: `0x${string}` }) {
+  const account = privateKeyToAccount(opts.privateKey);
+  const transport = http(opts.rpcUrl);
   const publicClient = createPublicClient({ chain: unichainSepolia, transport });
   const walletClient = createWalletClient({ chain: unichainSepolia, transport, account });
   return { publicClient, walletClient, account };

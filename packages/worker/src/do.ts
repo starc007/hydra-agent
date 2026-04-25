@@ -1,42 +1,51 @@
-import { DurableObject } from "cloudflare:workers";
-import type { PublicClient } from "viem";
-import type { Env, Config } from "./config";
-import { loadConfig } from "./config";
-import { Bus } from "./bus";
-import { newEvent } from "./ids";
-import type { HydraEvent } from "./events";
-import {
-  attachArchiver,
-  listEvents,
-  listDecisions,
-  writeDecision,
-} from "./store/d1";
-import { fetchPoolState, priceFromSqrtX96, type PoolState } from "./chain/pool";
-import { readErc20Metadata, type TokenMetadata } from "./chain/erc20";
-import { makeClients } from "./chain/client";
-import { readPositionMetadata } from "./chain/position";
-import { readPositionFees } from "./chain/state-view";
-import { LLMClient } from "./llm/client";
-import { PriceAgent } from "./agents/price";
-import { RiskAgent } from "./agents/risk";
-import { StrategyAgent } from "./agents/strategy";
-import { Coordinator } from "./agents/coordinator";
-import { ExecutionAgent } from "./agents/execution";
-import { makeSubmit } from "./chain/submit";
-import { attachTelegramSender } from "./bot/telegram";
+import { DurableObject } from 'cloudflare:workers';
+import type { PublicClient } from 'viem';
+import type { Env, Config } from './config';
+import { loadConfig } from './config';
+import { Bus } from './bus';
+import { newEvent } from './ids';
+import type { HydraEvent } from './events';
+import { attachArchiver, listEvents, listDecisions, writeDecision } from './store/d1';
+import { deriveDoId } from './store/users';
+import { fetchPoolState, priceFromSqrtX96, type PoolState } from './chain/pool';
+import { readErc20Metadata, type TokenMetadata } from './chain/erc20';
+import { makeClients } from './chain/client';
+import { readPositionMetadata } from './chain/position';
+import { readPositionFees } from './chain/state-view';
+import { LLMClient } from './llm/client';
+import { PriceAgent } from './agents/price';
+import { RiskAgent } from './agents/risk';
+import { StrategyAgent } from './agents/strategy';
+import { Coordinator } from './agents/coordinator';
+import { ExecutionAgent } from './agents/execution';
+import { makeSubmit } from './chain/submit';
+import { attachTelegramSender } from './bot/telegram';
+import { privateKeyToAccount } from 'viem/accounts';
 
 type Range = { tickLower: number; tickUpper: number };
+
+type StoredUser = {
+  wallet: `0x${string}`;
+  tokenId: string;             // bigint as string
+  privateKey: `0x${string}`;
+  telegramChatId?: string;
+  stableCurrency?: string;     // hex address
+  sessionTokenHash: string;    // sha256 hex
+};
+
+const NOT_REGISTERED = 'not_registered';
 
 export class HydraDO extends DurableObject<Env> {
   private bus = new Bus();
   private cfg: Config;
   private booted = false;
+  private user?: StoredUser;
+  private doId: string = '';
   private range: Range = { tickLower: -887200, tickUpper: 887200 };
   private latestPool?: PoolState;
   private entryPrice?: number;
   private positionMeta?: import('./chain/position').PositionMetadata;
   private tokenMeta?: { token0: TokenMetadata; token1: TokenMetadata };
-  // Active LP NFT id. Defaults to cfg.TOKEN_ID; replaced (and persisted) after each rebalance mint.
   private activeTokenId!: bigint;
   private agents: {
     price: PriceAgent;
@@ -51,32 +60,114 @@ export class HydraDO extends DurableObject<Env> {
     this.cfg = loadConfig(env);
   }
 
+  // ────── registration ──────
+
+  async register(args: {
+    wallet: `0x${string}`;
+    tokenId: string;
+    privateKey: `0x${string}`;
+    telegramChatId?: string;
+    stableCurrency?: string;
+    sessionTokenHash: string;
+  }): Promise<{ doId: string; range: Range }> {
+    // Validate that the private key derives the wallet
+    const derived = privateKeyToAccount(args.privateKey).address.toLowerCase();
+    if (derived !== args.wallet.toLowerCase()) {
+      throw new Error('private key does not match wallet address');
+    }
+
+    // Validate that the wallet owns this position via PositionManager.ownerOf
+    const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
+    const ownerOf = await publicClient.readContract({
+      address: this.cfg.positionManager,
+      abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
+      functionName: 'ownerOf',
+      args: [BigInt(args.tokenId)],
+    }) as `0x${string}`;
+    if (ownerOf.toLowerCase() !== args.wallet.toLowerCase()) {
+      throw new Error('wallet does not own this LP NFT');
+    }
+
+    this.user = {
+      wallet: args.wallet,
+      tokenId: args.tokenId,
+      privateKey: args.privateKey,
+      telegramChatId: args.telegramChatId,
+      stableCurrency: args.stableCurrency,
+      sessionTokenHash: args.sessionTokenHash,
+    };
+    await this.ctx.storage.put('user', this.user);
+    this.doId = deriveDoId(args.wallet, BigInt(args.tokenId));
+    await this.ctx.storage.put('doId', this.doId);
+
+    // Reset per-position state
+    this.activeTokenId = BigInt(args.tokenId);
+    await this.ctx.storage.put('activeTokenId', args.tokenId);
+    await this.ctx.storage.delete('range');
+    await this.ctx.storage.delete('entryPrice');
+
+    // Force a fresh boot
+    this.booted = false;
+    this.agents = null;
+    await this.boot();
+    return { doId: this.doId, range: this.range };
+  }
+
+  async unregister(): Promise<void> {
+    this.booted = false;
+    this.agents = null;
+    this.user = undefined;
+    await this.ctx.storage.deleteAll();
+  }
+
+  async verifySession(sessionTokenHash: string): Promise<boolean> {
+    if (!this.user) {
+      this.user = await this.ctx.storage.get<StoredUser>('user');
+    }
+    if (!this.user) return false;
+    return this.user.sessionTokenHash === sessionTokenHash;
+  }
+
   // ────── lifecycle ──────
 
   private async boot(): Promise<void> {
     if (this.booted) return;
+
+    this.user = await this.ctx.storage.get<StoredUser>('user');
+    if (!this.user) {
+      throw new Error(NOT_REGISTERED);
+    }
+    this.doId =
+      (await this.ctx.storage.get<string>('doId')) ??
+      deriveDoId(this.user.wallet, BigInt(this.user.tokenId));
+
     this.booted = true;
 
-    attachArchiver(this.bus, this.env.DB);
+    attachArchiver(this.bus, this.env.DB, this.doId);
 
-    const stored = await this.ctx.storage.get<Range>("range");
-    this.range = stored ?? {
-      tickLower: this.cfg.POSITION_TICK_LOWER,
-      tickUpper: this.cfg.POSITION_TICK_UPPER,
-    };
+    const stored = await this.ctx.storage.get<Range>('range');
+    this.range = stored ?? { tickLower: -887200, tickUpper: 887200 };
 
-    this.entryPrice = await this.ctx.storage.get<number>("entryPrice");
+    this.entryPrice = await this.ctx.storage.get<number>('entryPrice');
 
-    const storedTokenId = await this.ctx.storage.get<string>("activeTokenId");
-    this.activeTokenId = storedTokenId ? BigInt(storedTokenId) : this.cfg.TOKEN_ID;
+    const storedTokenId = await this.ctx.storage.get<string>('activeTokenId');
+    this.activeTokenId = BigInt(storedTokenId ?? this.user.tokenId);
 
-    const { publicClient, walletClient, account } = makeClients(this.cfg);
+    const { publicClient, walletClient, account } = makeClients({
+      rpcUrl: this.cfg.RPC_URL,
+      privateKey: this.user.privateKey,
+    });
 
-    // Read the real position metadata once on boot — overrides POSITION_TICK_* defaults.
+    // Read position metadata on boot — overrides default range if not already stored.
     try {
-      this.positionMeta = await readPositionMetadata(publicClient, this.cfg.positionManager, this.activeTokenId);
+      this.positionMeta = await readPositionMetadata(
+        publicClient,
+        this.cfg.positionManager,
+        this.activeTokenId,
+      );
       if (!stored) {
         this.range = { tickLower: this.positionMeta.tickLower, tickUpper: this.positionMeta.tickUpper };
+        await this.ctx.storage.put('range', this.range);
       }
       const [token0, token1] = await Promise.all([
         readErc20Metadata(publicClient, this.positionMeta.poolKey.currency0),
@@ -86,10 +177,12 @@ export class HydraDO extends DurableObject<Env> {
     } catch (err) {
       console.error('[do] failed to read position metadata; pool reads will fail until fixed', err);
     }
+
     const claude = new LLMClient(this.cfg);
 
     const priceOf = (s: PoolState) =>
       priceFromSqrtX96(s.sqrtPriceX96, s.token0.decimals, s.token1.decimals);
+
     const price = new PriceAgent(this.bus, {
       range: () => this.range,
       fetcher: async () => {
@@ -106,12 +199,13 @@ export class HydraDO extends DurableObject<Env> {
         });
         if (this.entryPrice == null) {
           this.entryPrice = priceOf(this.latestPool);
-          await this.ctx.storage.put("entryPrice", this.entryPrice);
+          await this.ctx.storage.put('entryPrice', this.entryPrice);
         }
         return this.latestPool;
       },
       priceOf,
     });
+
     const risk = new RiskAgent(this.bus, {
       thresholdPct: this.cfg.IL_THRESHOLD_PCT,
       sample: async () => {
@@ -142,17 +236,14 @@ export class HydraDO extends DurableObject<Env> {
           });
           const fees0Float = Number(fees0) / 10 ** pool.token0.decimals;
           const fees1Float = Number(fees1) / 10 ** pool.token1.decimals;
-          const stable = (this.cfg.STABLE_CURRENCY ?? '').toLowerCase();
+          const stable = (this.user!.stableCurrency ?? '').toLowerCase();
           const isToken0Stable = stable && pool.token0.address.toLowerCase() === stable;
           const isToken1Stable = stable && pool.token1.address.toLowerCase() === stable;
           if (isToken0Stable) {
-            // priceNow = token0 / token1, so 1 token1 = 1/priceNow USD
             feesEarnedUsd = fees0Float + fees1Float / priceNow;
           } else if (isToken1Stable || !stable) {
-            // back-compat: assume token1 is stable. priceNow = token0 in token1 terms.
             feesEarnedUsd = fees0Float * priceNow + fees1Float;
           } else {
-            // STABLE_CURRENCY set but matches neither side — skip USD conversion.
             feesEarnedUsd = 0;
           }
         } catch (err) {
@@ -161,19 +252,21 @@ export class HydraDO extends DurableObject<Env> {
         return { priceEntry, priceNow, feesEarnedUsd };
       },
     });
+
     const strategy = new StrategyAgent(this.bus, {
       client: claude,
-      getPosition: () => ({ range: this.range, address: account.address }),
+      getPosition: () => ({
+        range: this.range,
+        tokenId: this.activeTokenId.toString(),
+        wallet: this.user!.wallet,
+      }),
     });
+
     const coordinator = new Coordinator(this.bus, {
       dailyTxCap: this.cfg.DAILY_TX_CAP,
       cooldownSec: this.cfg.COOLDOWN_SEC,
       minConfidence: this.cfg.MIN_CONFIDENCE,
-      requireSignals: [
-        "OUT_OF_RANGE",
-        "IL_THRESHOLD_BREACH",
-        "FEE_HARVEST_READY",
-      ],
+      requireSignals: ['OUT_OF_RANGE', 'IL_THRESHOLD_BREACH', 'FEE_HARVEST_READY'],
     });
 
     const submit = makeSubmit({
@@ -188,11 +281,13 @@ export class HydraDO extends DurableObject<Env> {
         tickSpacing: 60,
         hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`,
       },
-      poolId: this.positionMeta?.poolId ?? ('0x' + '00'.repeat(32)) as `0x${string}`,
+      poolId: this.positionMeta?.poolId ?? (('0x' + '00'.repeat(32)) as `0x${string}`),
       tokenId: () => this.activeTokenId,
       recipient: account.address,
       slippageBps: this.cfg.SLIPPAGE_BPS,
-      onPositionMinted: async (newTokenId) => { await this.handleNewPosition(newTokenId, publicClient); },
+      onPositionMinted: async (newTokenId) => {
+        await this.handleNewPosition(newTokenId, publicClient);
+      },
     });
     const execution = new ExecutionAgent(this.bus, submit);
 
@@ -200,15 +295,17 @@ export class HydraDO extends DurableObject<Env> {
     coordinator.start();
     execution.start();
 
-    if (this.cfg.TELEGRAM_BOT_TOKEN && this.cfg.TELEGRAM_CHAT_ID) {
-      attachTelegramSender(this.bus, {
-        token: this.cfg.TELEGRAM_BOT_TOKEN,
-        chatId: this.cfg.TELEGRAM_CHAT_ID,
-      });
+    if (this.cfg.TELEGRAM_BOT_TOKEN && this.user.telegramChatId) {
+      attachTelegramSender(
+        this.bus,
+        { token: this.cfg.TELEGRAM_BOT_TOKEN, chatId: this.user.telegramChatId },
+        this.doId,
+        this.env.DB,
+      );
     }
 
-    this.bus.on("APPROVED", (e) => {
-      void writeDecision(this.env.DB, {
+    this.bus.on('APPROVED', (e) => {
+      void writeDecision(this.env.DB, this.doId, {
         id: e.id,
         ts: e.ts,
         action: e.payload.action,
@@ -221,8 +318,8 @@ export class HydraDO extends DurableObject<Env> {
         },
       });
     });
-    this.bus.on("ESCALATE", (e) => {
-      void writeDecision(this.env.DB, {
+    this.bus.on('ESCALATE', (e) => {
+      void writeDecision(this.env.DB, this.doId, {
         id: e.id,
         ts: e.ts,
         action: e.payload.recommendation.action,
@@ -235,19 +332,25 @@ export class HydraDO extends DurableObject<Env> {
     this.bus.onAny((evt) => this.broadcast(evt));
 
     this.agents = { price, risk, strategy, coordinator, execution };
-
     await this.ctx.storage.setAlarm(Date.now() + this.cfg.TICK_INTERVAL_MS);
   }
 
   // ────── alarm tick ──────
 
   override async alarm(): Promise<void> {
-    await this.boot();
+    try {
+      await this.boot();
+    } catch (err) {
+      const msg = String(err instanceof Error ? err.message : err);
+      if (msg.includes(NOT_REGISTERED)) return; // silently skip unregistered DOs
+      console.error('[do] boot failed in alarm', err);
+      return;
+    }
     if (!this.agents) return;
     try {
       await Promise.all([this.agents.price.tick(), this.agents.risk.tick()]);
     } catch (err) {
-      console.error("[do] tick failed", err);
+      console.error('[do] tick failed', err);
     }
     await this.ctx.storage.setAlarm(Date.now() + this.cfg.TICK_INTERVAL_MS);
   }
@@ -261,35 +364,38 @@ export class HydraDO extends DurableObject<Env> {
   }
 
   async injectHumanDecision(
-    decision: "approve" | "override",
+    decision: 'approve' | 'override',
     correlatesTo: string,
   ): Promise<void> {
     await this.boot();
     this.bus.emit(
       newEvent({
-        source: "bot",
-        type: "HUMAN_DECISION",
+        source: 'bot',
+        type: 'HUMAN_DECISION',
         payload: { decision, correlatesTo },
       }),
     );
   }
 
-  async forceAction(action: "REBALANCE" | "HARVEST" | "EXIT"): Promise<void> {
+  async forceAction(action: 'REBALANCE' | 'HARVEST' | 'EXIT'): Promise<void> {
     await this.boot();
     this.bus.emit(
       newEvent({
-        source: "coordinator",
-        type: "APPROVED",
-        payload: { action, reason: "admin force" },
+        source: 'coordinator',
+        type: 'APPROVED',
+        payload: { action, reason: 'admin force' },
       }),
     );
   }
 
   async snapshot() {
     await this.boot();
-    const events = await listEvents(this.env.DB, 100);
-    const decisions = await listDecisions(this.env.DB, 50);
+    const events = await listEvents(this.env.DB, this.doId, 100);
+    const decisions = await listDecisions(this.env.DB, this.doId, 50);
     return {
+      doId: this.doId,
+      wallet: this.user?.wallet,
+      tokenId: this.user?.tokenId,
       range: this.range,
       entryPrice: this.entryPrice,
       latestPool: this.latestPool,
@@ -301,31 +407,25 @@ export class HydraDO extends DurableObject<Env> {
 
   async setRange(range: Range): Promise<void> {
     this.range = range;
-    await this.ctx.storage.put("range", range);
+    await this.ctx.storage.put('range', range);
   }
 
   /**
    * Called from the Execution Agent when a REBALANCE tx mints a fresh LP NFT.
    * Repoints the worker at the new tokenId, refreshes positionMeta + range, and
    * resets the entry price so the Risk Agent's IL math restarts from the rebalance moment.
-   *
-   * NOTE: Unichain Sepolia's "latest" RPC view can lag the mined block by a few hundred
-   * milliseconds even after waitForTransactionReceipt resolves. PositionInfo for a freshly
-   * minted tokenId may briefly read as all zeros. We retry the read with backoff until we
-   * see a non-degenerate result (or give up after a few attempts).
    */
   private async handleNewPosition(newTokenId: bigint, publicClient: PublicClient): Promise<void> {
     this.activeTokenId = newTokenId;
-    await this.ctx.storage.put("activeTokenId", newTokenId.toString());
+    await this.ctx.storage.put('activeTokenId', newTokenId.toString());
 
     this.entryPrice = undefined;
-    await this.ctx.storage.delete("entryPrice");
+    await this.ctx.storage.delete('entryPrice');
 
     let meta: import('./chain/position').PositionMetadata | undefined;
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
         const m = await readPositionMetadata(publicClient, this.cfg.positionManager, newTokenId);
-        // Reject degenerate state where the RPC hasn't caught up yet.
         if (m.tickLower !== 0 || m.tickUpper !== 0) {
           meta = m;
           break;
@@ -333,7 +433,7 @@ export class HydraDO extends DurableObject<Env> {
       } catch (err) {
         console.error(`[do] readPositionMetadata attempt ${attempt + 1} threw`, err);
       }
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); // 0.5s, 1s, 1.5s, ...
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
     }
 
     if (!meta) {
@@ -343,25 +443,34 @@ export class HydraDO extends DurableObject<Env> {
 
     this.positionMeta = meta;
     this.range = { tickLower: meta.tickLower, tickUpper: meta.tickUpper };
-    await this.ctx.storage.put("range", this.range);
-    console.log(`[do] active position is now tokenId=${newTokenId} range=${this.range.tickLower}..${this.range.tickUpper}`);
+    await this.ctx.storage.put('range', this.range);
+    console.log(
+      `[do] active position is now tokenId=${newTokenId} range=${this.range.tickLower}..${this.range.tickUpper}`,
+    );
   }
 
   // ────── WebSocket ──────
 
   override async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === "/ws") {
-      const upgrade = req.headers.get("upgrade");
-      if (upgrade !== "websocket")
-        return new Response("expected websocket", { status: 400 });
+    if (url.pathname === '/ws') {
+      const upgrade = req.headers.get('upgrade');
+      if (upgrade !== 'websocket') return new Response('expected websocket', { status: 400 });
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);
-      await this.boot();
+      try {
+        await this.boot();
+      } catch (err) {
+        const msg = String(err instanceof Error ? err.message : err);
+        if (msg.includes(NOT_REGISTERED)) {
+          return new Response('not registered', { status: 404 });
+        }
+        throw err;
+      }
       return new Response(null, { status: 101, webSocket: client });
     }
-    return new Response("not found", { status: 404 });
+    return new Response('not found', { status: 404 });
   }
 
   override webSocketMessage(_ws: WebSocket, _msg: ArrayBuffer | string): void {}
