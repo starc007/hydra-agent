@@ -4,51 +4,47 @@ export type Env = {
   HYDRA: DurableObjectNamespace;
   DB: D1Database;
 
+  // LLM (host-provided, shared)
   ANTHROPIC_API_KEY?: string;
-  PRIVATE_KEY: string;
-  TELEGRAM_BOT_TOKEN?: string;
-  TELEGRAM_CHAT_ID?: string;
-  LLM_PROVIDER?: string;
-  LLM_MODEL?: string;
   GOOGLE_GENERATIVE_AI_API_KEY?: string;
   OPENAI_API_KEY?: string;
+  LLM_PROVIDER?: string;
+  LLM_MODEL?: string;
 
+  // Telegram (shared bot, per-user chat_id stored in DO)
+  TELEGRAM_BOT_TOKEN?: string;
+
+  // Chain (per-deployment, supports one chain per worker)
   RPC_URL: string;
   CHAIN_ID: string;
-  POOL_ID: string;
   POSITION_MANAGER: string;
   STATE_VIEW: string;
-  TOKEN_ID: string;
-  POSITION_TICK_LOWER: string;
-  POSITION_TICK_UPPER: string;
+  UNISWAP_API_BASE: string;
+  UNISWAP_API_KEY?: string;
   DASHBOARD_ORIGIN: string;
 
+  // Coordinator + risk knobs (shared default policy across users; can be overridden per-user later)
   IL_THRESHOLD_PCT: string;
   DAILY_TX_CAP: string;
   COOLDOWN_SEC: string;
   MIN_CONFIDENCE: string;
   TICK_INTERVAL_MS: string;
-  SLIPPAGE_BPS?: string;
-  STABLE_CURRENCY?: string;
+  SLIPPAGE_BPS: string;
 };
 
 const Schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
-  PRIVATE_KEY: z.string().startsWith('0x'),
-  TELEGRAM_BOT_TOKEN: z.string().optional(),
-  TELEGRAM_CHAT_ID: z.string().optional(),
-  LLM_PROVIDER: z.enum(['anthropic', 'google', 'openai']).default('anthropic'),
-  LLM_MODEL: z.string().optional(),
   GOOGLE_GENERATIVE_AI_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  LLM_PROVIDER: z.enum(['anthropic', 'google', 'openai']).default('anthropic'),
+  LLM_MODEL: z.string().optional(),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
   RPC_URL: z.string().url(),
   CHAIN_ID: z.coerce.number(),
-  POOL_ID: z.string().startsWith('0x'),
   POSITION_MANAGER: z.string().startsWith('0x'),
   STATE_VIEW: z.string().startsWith('0x'),
-  TOKEN_ID: z.coerce.bigint(),
-  POSITION_TICK_LOWER: z.coerce.number().int(),
-  POSITION_TICK_UPPER: z.coerce.number().int(),
+  UNISWAP_API_BASE: z.string().url(),
+  UNISWAP_API_KEY: z.string().optional(),
   DASHBOARD_ORIGIN: z.string(),
   IL_THRESHOLD_PCT: z.coerce.number(),
   DAILY_TX_CAP: z.coerce.number(),
@@ -56,12 +52,9 @@ const Schema = z.object({
   MIN_CONFIDENCE: z.coerce.number(),
   TICK_INTERVAL_MS: z.coerce.number(),
   SLIPPAGE_BPS: z.coerce.number().int().min(0).max(10_000).default(50),
-  STABLE_CURRENCY: z.string().startsWith('0x').optional(),
 });
 
 export type Config = z.infer<typeof Schema> & {
-  privateKey: `0x${string}`;
-  poolId: `0x${string}`;
   positionManager: `0x${string}`;
   stateView: `0x${string}`;
 };
@@ -79,8 +72,6 @@ export function loadConfig(env: Env): Config {
   }
   return {
     ...p,
-    privateKey: p.PRIVATE_KEY as `0x${string}`,
-    poolId: p.POOL_ID as `0x${string}`,
     positionManager: p.POSITION_MANAGER as `0x${string}`,
     stateView: p.STATE_VIEW as `0x${string}`,
   };
