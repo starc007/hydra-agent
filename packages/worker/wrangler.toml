@@ -21,6 +21,7 @@ migrations_dir = "migrations"
 crons = ["* * * * *"]
 
 [vars]
+LLM_PROVIDER = "anthropic"
 RPC_URL = "https://sepolia.unichain.org"
 CHAIN_ID = "1301"
 POOL_ID = "REPLACE_AT_TASK_4_0"

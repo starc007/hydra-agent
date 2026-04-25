@@ -4,11 +4,15 @@ export type Env = {
   HYDRA: DurableObjectNamespace;
   DB: D1Database;
 
-  ANTHROPIC_API_KEY: string;
+  ANTHROPIC_API_KEY?: string;
   PRIVATE_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
   UNISWAP_API_KEY?: string;
+  LLM_PROVIDER?: string;
+  LLM_MODEL?: string;
+  GOOGLE_GENERATIVE_AI_API_KEY?: string;
+  OPENAI_API_KEY?: string;
 
   RPC_URL: string;
   CHAIN_ID: string;
@@ -26,11 +30,15 @@ export type Env = {
 };
 
 const Schema = z.object({
-  ANTHROPIC_API_KEY: z.string().min(1),
+  ANTHROPIC_API_KEY: z.string().optional(),
   PRIVATE_KEY: z.string().startsWith('0x'),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   UNISWAP_API_KEY: z.string().optional(),
+  LLM_PROVIDER: z.enum(['anthropic', 'google', 'openai']).default('anthropic'),
+  LLM_MODEL: z.string().optional(),
+  GOOGLE_GENERATIVE_AI_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
   RPC_URL: z.string().url(),
   CHAIN_ID: z.coerce.number(),
   POOL_ID: z.string().startsWith('0x'),
@@ -53,6 +61,15 @@ export type Config = z.infer<typeof Schema> & {
 
 export function loadConfig(env: Env): Config {
   const p = Schema.parse(env);
+  if (p.LLM_PROVIDER === 'anthropic' && !p.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic');
+  }
+  if (p.LLM_PROVIDER === 'google' && !p.GOOGLE_GENERATIVE_AI_API_KEY) {
+    throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is required when LLM_PROVIDER=google');
+  }
+  if (p.LLM_PROVIDER === 'openai' && !p.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is required when LLM_PROVIDER=openai');
+  }
   return {
     ...p,
     privateKey: p.PRIVATE_KEY as `0x${string}`,
