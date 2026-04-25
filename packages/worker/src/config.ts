@@ -18,6 +18,7 @@ export type Env = {
   CHAIN_ID: string;
   POOL_ID: string;
   POSITION_MANAGER: string;
+  STATE_VIEW: string;
   TOKEN_ID: string;
   POSITION_TICK_LOWER: string;
   POSITION_TICK_UPPER: string;
@@ -45,6 +46,7 @@ const Schema = z.object({
   CHAIN_ID: z.coerce.number(),
   POOL_ID: z.string().startsWith('0x'),
   POSITION_MANAGER: z.string().startsWith('0x'),
+  STATE_VIEW: z.string().startsWith('0x'),
   TOKEN_ID: z.coerce.bigint(),
   POSITION_TICK_LOWER: z.coerce.number().int(),
   POSITION_TICK_UPPER: z.coerce.number().int(),
@@ -61,6 +63,7 @@ export type Config = z.infer<typeof Schema> & {
   privateKey: `0x${string}`;
   poolId: `0x${string}`;
   positionManager: `0x${string}`;
+  stateView: `0x${string}`;
 };
 
 export function loadConfig(env: Env): Config {
@@ -79,5 +82,6 @@ export function loadConfig(env: Env): Config {
     privateKey: p.PRIVATE_KEY as `0x${string}`,
     poolId: p.POOL_ID as `0x${string}`,
     positionManager: p.POSITION_MANAGER as `0x${string}`,
+    stateView: p.STATE_VIEW as `0x${string}`,
   };
 }

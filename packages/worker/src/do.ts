@@ -12,6 +12,8 @@ import {
 } from "./store/d1";
 import { fetchPoolState, priceFromSqrtX96, type PoolState } from "./chain/pool";
 import { makeClients } from "./chain/client";
+import { readPositionLiquidity, readPositionMetadata } from "./chain/position";
+import { readPositionFees } from "./chain/state-view";
 import { LLMClient } from "./llm/client";
 import { PriceAgent } from "./agents/price";
 import { RiskAgent } from "./agents/risk";
@@ -30,6 +32,7 @@ export class HydraDO extends DurableObject<Env> {
   private range: Range = { tickLower: -887200, tickUpper: 887200 };
   private latestPool?: PoolState;
   private entryPrice?: number;
+  private positionMeta?: import('./chain/position').PositionMetadata;
   private agents: {
     price: PriceAgent;
     risk: RiskAgent;
@@ -60,6 +63,16 @@ export class HydraDO extends DurableObject<Env> {
     this.entryPrice = await this.ctx.storage.get<number>("entryPrice");
 
     const { publicClient, walletClient, account } = makeClients(this.cfg);
+
+    // Read the real position metadata once on boot — overrides POSITION_TICK_* defaults.
+    try {
+      this.positionMeta = await readPositionMetadata(publicClient, this.cfg.positionManager, this.cfg.TOKEN_ID);
+      if (!stored) {
+        this.range = { tickLower: this.positionMeta.tickLower, tickUpper: this.positionMeta.tickUpper };
+      }
+    } catch (err) {
+      console.error('[do] failed to read position metadata; using env defaults', err);
+    }
     const claude = new LLMClient(this.cfg);
 
     const priceOf = (s: PoolState) =>
@@ -81,14 +94,29 @@ export class HydraDO extends DurableObject<Env> {
       sample: async () => {
         const pool = this.latestPool ?? (await fetchPoolState(this.cfg));
         this.latestPool = pool;
-        const priceNow = priceFromSqrtX96(
-          pool.sqrtPriceX96,
-          pool.token0.decimals,
-          pool.token1.decimals,
-        );
+        const priceNow = priceFromSqrtX96(pool.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
         const priceEntry = this.entryPrice ?? priceNow;
-        // feesEarnedUsd hardcoded to 0 — see FEEDBACK.md, v4 PositionManager fee read TBD
-        return { priceEntry, priceNow, feesEarnedUsd: 0 };
+        let feesEarnedUsd = 0;
+        if (this.positionMeta) {
+          try {
+            const { fees0, fees1 } = await readPositionFees({
+              client: publicClient,
+              stateView: this.cfg.stateView,
+              poolId: this.positionMeta.poolId,
+              positionManager: this.cfg.positionManager,
+              tokenId: this.cfg.TOKEN_ID,
+              tickLower: this.positionMeta.tickLower,
+              tickUpper: this.positionMeta.tickUpper,
+            });
+            const fees0Float = Number(fees0) / 10 ** pool.token0.decimals;
+            const fees1Float = Number(fees1) / 10 ** pool.token1.decimals;
+            // Treat token1 as the USD-stable side (USDC). priceNow = price of token0 in token1.
+            feesEarnedUsd = fees0Float * priceNow + fees1Float;
+          } catch (err) {
+            console.error('[risk] fee read failed', err);
+          }
+        }
+        return { priceEntry, priceNow, feesEarnedUsd };
       },
     });
     const strategy = new StrategyAgent(this.bus, {
@@ -110,16 +138,15 @@ export class HydraDO extends DurableObject<Env> {
       publicClient,
       walletClient,
       positionManager: this.cfg.positionManager,
-      poolKey: {
-        currency0:
-          "0x0000000000000000000000000000000000000000" as `0x${string}`,
-        currency1:
-          "0x0000000000000000000000000000000000000000" as `0x${string}`,
+      poolKey: this.positionMeta?.poolKey ?? {
+        currency0: '0x0000000000000000000000000000000000000000' as `0x${string}`,
+        currency1: '0x0000000000000000000000000000000000000000' as `0x${string}`,
         fee: 500,
         tickSpacing: 60,
-        hooks: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+        hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`,
       },
       tokenId: this.cfg.TOKEN_ID,
+      recipient: account.address,
       currentTick: async () =>
         (this.latestPool ?? (await fetchPoolState(this.cfg))).tick,
     });
