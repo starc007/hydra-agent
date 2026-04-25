@@ -19,6 +19,8 @@ export type Env = {
   POOL_ID: string;
   POSITION_MANAGER: string;
   TOKEN_ID: string;
+  POSITION_TICK_LOWER: string;
+  POSITION_TICK_UPPER: string;
   UNISWAP_API_BASE: string;
   DASHBOARD_ORIGIN: string;
 
@@ -44,6 +46,8 @@ const Schema = z.object({
   POOL_ID: z.string().startsWith('0x'),
   POSITION_MANAGER: z.string().startsWith('0x'),
   TOKEN_ID: z.coerce.bigint(),
+  POSITION_TICK_LOWER: z.coerce.number().int(),
+  POSITION_TICK_UPPER: z.coerce.number().int(),
   UNISWAP_API_BASE: z.string().url(),
   DASHBOARD_ORIGIN: z.string(),
   IL_THRESHOLD_PCT: z.coerce.number(),

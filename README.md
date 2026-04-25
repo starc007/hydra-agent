@@ -120,9 +120,12 @@ cp .dev.vars.example packages/worker/.dev.vars
 #   UNISWAP_API_KEY=                    # optional
 ```
 
-### 3. Set the pool target
+### 3. Set the pool + position target
 
-In `packages/worker/wrangler.toml`, replace `POOL_ID` and `POSITION_MANAGER` with the WETH/USDC v4 pool you want to manage on Unichain Sepolia (chainId 1301).
+In `packages/worker/wrangler.toml`:
+- `POOL_ID` and `POSITION_MANAGER` — the v4 pool you want to manage on Unichain Sepolia (chainId 1301).
+- `TOKEN_ID` — your LP NFT id from PositionManager.
+- `POSITION_TICK_LOWER` / `POSITION_TICK_UPPER` — your position's range. The DO seeds `range` from these on first boot; afterwards the stored value wins (settable at runtime via `POST /admin/range`).
 
 ### 4. Create the D1 database
 
@@ -153,10 +156,19 @@ Open `http://localhost:3000`. Within ~10s the live feed should start showing `PR
 
 ```bash
 cd packages/worker
-npx wrangler secret put ANTHROPIC_API_KEY
+# wallet (required)
 npx wrangler secret put PRIVATE_KEY
-npx wrangler secret put TELEGRAM_BOT_TOKEN     # optional
-npx wrangler secret put TELEGRAM_CHAT_ID       # optional
+
+# LLM key — push the one matching wrangler.toml's LLM_PROVIDER
+npx wrangler secret put ANTHROPIC_API_KEY            # if LLM_PROVIDER=anthropic
+npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY # if LLM_PROVIDER=google
+npx wrangler secret put OPENAI_API_KEY               # if LLM_PROVIDER=openai
+
+# optional
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+npx wrangler secret put UNISWAP_API_KEY
+
 npm run db:migrate:remote
 npm run deploy
 # note the *.workers.dev URL

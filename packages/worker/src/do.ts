@@ -52,7 +52,10 @@ export class HydraDO extends DurableObject<Env> {
     attachArchiver(this.bus, this.env.DB);
 
     const stored = await this.ctx.storage.get<Range>("range");
-    if (stored) this.range = stored;
+    this.range = stored ?? {
+      tickLower: this.cfg.POSITION_TICK_LOWER,
+      tickUpper: this.cfg.POSITION_TICK_UPPER,
+    };
 
     this.entryPrice = await this.ctx.storage.get<number>("entryPrice");
 
@@ -84,6 +87,7 @@ export class HydraDO extends DurableObject<Env> {
           pool.token1.decimals,
         );
         const priceEntry = this.entryPrice ?? priceNow;
+        // feesEarnedUsd hardcoded to 0 — see FEEDBACK.md, v4 PositionManager fee read TBD
         return { priceEntry, priceNow, feesEarnedUsd: 0 };
       },
     });

@@ -21,12 +21,14 @@ migrations_dir = "migrations"
 crons = ["* * * * *"]
 
 [vars]
-LLM_PROVIDER = "anthropic"
+LLM_PROVIDER = "google"
 RPC_URL = "https://sepolia.unichain.org"
 CHAIN_ID = "1301"
 POOL_ID = "REPLACE_AT_TASK_4_0"
 POSITION_MANAGER = "REPLACE_AT_TASK_4_0"
 TOKEN_ID = "0"
+POSITION_TICK_LOWER = "-887200"
+POSITION_TICK_UPPER = "887200"
 UNISWAP_API_BASE = "https://api.uniswap.org"
 DASHBOARD_ORIGIN = "*"
 IL_THRESHOLD_PCT = "2.5"
