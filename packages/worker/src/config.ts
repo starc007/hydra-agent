@@ -8,7 +8,6 @@ export type Env = {
   PRIVATE_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
-  UNISWAP_API_KEY?: string;
   LLM_PROVIDER?: string;
   LLM_MODEL?: string;
   GOOGLE_GENERATIVE_AI_API_KEY?: string;
@@ -22,7 +21,6 @@ export type Env = {
   TOKEN_ID: string;
   POSITION_TICK_LOWER: string;
   POSITION_TICK_UPPER: string;
-  UNISWAP_API_BASE: string;
   DASHBOARD_ORIGIN: string;
 
   IL_THRESHOLD_PCT: string;
@@ -30,6 +28,8 @@ export type Env = {
   COOLDOWN_SEC: string;
   MIN_CONFIDENCE: string;
   TICK_INTERVAL_MS: string;
+  SLIPPAGE_BPS?: string;
+  STABLE_CURRENCY?: string;
 };
 
 const Schema = z.object({
@@ -37,7 +37,6 @@ const Schema = z.object({
   PRIVATE_KEY: z.string().startsWith('0x'),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
-  UNISWAP_API_KEY: z.string().optional(),
   LLM_PROVIDER: z.enum(['anthropic', 'google', 'openai']).default('anthropic'),
   LLM_MODEL: z.string().optional(),
   GOOGLE_GENERATIVE_AI_API_KEY: z.string().optional(),
@@ -50,13 +49,14 @@ const Schema = z.object({
   TOKEN_ID: z.coerce.bigint(),
   POSITION_TICK_LOWER: z.coerce.number().int(),
   POSITION_TICK_UPPER: z.coerce.number().int(),
-  UNISWAP_API_BASE: z.string().url(),
   DASHBOARD_ORIGIN: z.string(),
   IL_THRESHOLD_PCT: z.coerce.number(),
   DAILY_TX_CAP: z.coerce.number(),
   COOLDOWN_SEC: z.coerce.number(),
   MIN_CONFIDENCE: z.coerce.number(),
   TICK_INTERVAL_MS: z.coerce.number(),
+  SLIPPAGE_BPS: z.coerce.number().int().min(0).max(10_000).default(50),
+  STABLE_CURRENCY: z.string().startsWith('0x').optional(),
 });
 
 export type Config = z.infer<typeof Schema> & {

@@ -9,6 +9,3 @@ PRIVATE_KEY=0x...
 # Telegram (optional)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
-
-# Uniswap API (optional)
-UNISWAP_API_KEY=

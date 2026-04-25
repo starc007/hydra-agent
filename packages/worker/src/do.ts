@@ -11,8 +11,9 @@ import {
   writeDecision,
 } from "./store/d1";
 import { fetchPoolState, priceFromSqrtX96, type PoolState } from "./chain/pool";
+import { readErc20Metadata, type TokenMetadata } from "./chain/erc20";
 import { makeClients } from "./chain/client";
-import { readPositionLiquidity, readPositionMetadata } from "./chain/position";
+import { readPositionMetadata } from "./chain/position";
 import { readPositionFees } from "./chain/state-view";
 import { LLMClient } from "./llm/client";
 import { PriceAgent } from "./agents/price";
@@ -33,6 +34,7 @@ export class HydraDO extends DurableObject<Env> {
   private latestPool?: PoolState;
   private entryPrice?: number;
   private positionMeta?: import('./chain/position').PositionMetadata;
+  private tokenMeta?: { token0: TokenMetadata; token1: TokenMetadata };
   private agents: {
     price: PriceAgent;
     risk: RiskAgent;
@@ -70,8 +72,13 @@ export class HydraDO extends DurableObject<Env> {
       if (!stored) {
         this.range = { tickLower: this.positionMeta.tickLower, tickUpper: this.positionMeta.tickUpper };
       }
+      const [token0, token1] = await Promise.all([
+        readErc20Metadata(publicClient, this.positionMeta.poolKey.currency0),
+        readErc20Metadata(publicClient, this.positionMeta.poolKey.currency1),
+      ]);
+      this.tokenMeta = { token0, token1 };
     } catch (err) {
-      console.error('[do] failed to read position metadata; using env defaults', err);
+      console.error('[do] failed to read position metadata; pool reads will fail until fixed', err);
     }
     const claude = new LLMClient(this.cfg);
 
@@ -80,7 +87,17 @@ export class HydraDO extends DurableObject<Env> {
     const price = new PriceAgent(this.bus, {
       range: () => this.range,
       fetcher: async () => {
-        this.latestPool = await fetchPoolState(this.cfg);
+        if (!this.positionMeta || !this.tokenMeta) {
+          throw new Error('position metadata not loaded; cannot fetch pool state');
+        }
+        this.latestPool = await fetchPoolState({
+          client: publicClient,
+          stateView: this.cfg.stateView,
+          poolId: this.positionMeta.poolId,
+          tickSpacing: this.positionMeta.poolKey.tickSpacing,
+          token0: this.tokenMeta.token0,
+          token1: this.tokenMeta.token1,
+        });
         if (this.entryPrice == null) {
           this.entryPrice = priceOf(this.latestPool);
           await this.ctx.storage.put("entryPrice", this.entryPrice);
@@ -92,29 +109,48 @@ export class HydraDO extends DurableObject<Env> {
     const risk = new RiskAgent(this.bus, {
       thresholdPct: this.cfg.IL_THRESHOLD_PCT,
       sample: async () => {
-        const pool = this.latestPool ?? (await fetchPoolState(this.cfg));
+        if (!this.positionMeta || !this.tokenMeta) {
+          throw new Error('position metadata not loaded; cannot sample risk');
+        }
+        const pool = this.latestPool ?? (await fetchPoolState({
+          client: publicClient,
+          stateView: this.cfg.stateView,
+          poolId: this.positionMeta.poolId,
+          tickSpacing: this.positionMeta.poolKey.tickSpacing,
+          token0: this.tokenMeta.token0,
+          token1: this.tokenMeta.token1,
+        }));
         this.latestPool = pool;
         const priceNow = priceFromSqrtX96(pool.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
         const priceEntry = this.entryPrice ?? priceNow;
         let feesEarnedUsd = 0;
-        if (this.positionMeta) {
-          try {
-            const { fees0, fees1 } = await readPositionFees({
-              client: publicClient,
-              stateView: this.cfg.stateView,
-              poolId: this.positionMeta.poolId,
-              positionManager: this.cfg.positionManager,
-              tokenId: this.cfg.TOKEN_ID,
-              tickLower: this.positionMeta.tickLower,
-              tickUpper: this.positionMeta.tickUpper,
-            });
-            const fees0Float = Number(fees0) / 10 ** pool.token0.decimals;
-            const fees1Float = Number(fees1) / 10 ** pool.token1.decimals;
-            // Treat token1 as the USD-stable side (USDC). priceNow = price of token0 in token1.
+        try {
+          const { fees0, fees1 } = await readPositionFees({
+            client: publicClient,
+            stateView: this.cfg.stateView,
+            poolId: this.positionMeta.poolId,
+            positionManager: this.cfg.positionManager,
+            tokenId: this.cfg.TOKEN_ID,
+            tickLower: this.positionMeta.tickLower,
+            tickUpper: this.positionMeta.tickUpper,
+          });
+          const fees0Float = Number(fees0) / 10 ** pool.token0.decimals;
+          const fees1Float = Number(fees1) / 10 ** pool.token1.decimals;
+          const stable = (this.cfg.STABLE_CURRENCY ?? '').toLowerCase();
+          const isToken0Stable = stable && pool.token0.address.toLowerCase() === stable;
+          const isToken1Stable = stable && pool.token1.address.toLowerCase() === stable;
+          if (isToken0Stable) {
+            // priceNow = token0 / token1, so 1 token1 = 1/priceNow USD
+            feesEarnedUsd = fees0Float + fees1Float / priceNow;
+          } else if (isToken1Stable || !stable) {
+            // back-compat: assume token1 is stable. priceNow = token0 in token1 terms.
             feesEarnedUsd = fees0Float * priceNow + fees1Float;
-          } catch (err) {
-            console.error('[risk] fee read failed', err);
+          } else {
+            // STABLE_CURRENCY set but matches neither side — skip USD conversion.
+            feesEarnedUsd = 0;
           }
+        } catch (err) {
+          console.error('[risk] fee read failed', err);
         }
         return { priceEntry, priceNow, feesEarnedUsd };
       },
@@ -138,6 +174,7 @@ export class HydraDO extends DurableObject<Env> {
       publicClient,
       walletClient,
       positionManager: this.cfg.positionManager,
+      stateView: this.cfg.stateView,
       poolKey: this.positionMeta?.poolKey ?? {
         currency0: '0x0000000000000000000000000000000000000000' as `0x${string}`,
         currency1: '0x0000000000000000000000000000000000000000' as `0x${string}`,
@@ -145,10 +182,10 @@ export class HydraDO extends DurableObject<Env> {
         tickSpacing: 60,
         hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`,
       },
+      poolId: this.positionMeta?.poolId ?? ('0x' + '00'.repeat(32)) as `0x${string}`,
       tokenId: this.cfg.TOKEN_ID,
       recipient: account.address,
-      currentTick: async () =>
-        (this.latestPool ?? (await fetchPoolState(this.cfg))).tick,
+      slippageBps: this.cfg.SLIPPAGE_BPS,
     });
     const execution = new ExecutionAgent(this.bus, submit);
 
