@@ -1,5 +1,14 @@
+# Required for the chosen LLM_PROVIDER
 ANTHROPIC_API_KEY=sk-ant-...
+GOOGLE_GENERATIVE_AI_API_KEY=
+OPENAI_API_KEY=
+
+# Wallet
 PRIVATE_KEY=0x...
+
+# Telegram (optional)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+
+# Uniswap API (optional)
 UNISWAP_API_KEY=
