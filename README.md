@@ -39,7 +39,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
 
                 Outbound:
                 ──────────────────────────────────────────
-                Uniswap API ─ pool state every 10s
+                StateView ──── pool state every 10s (on-chain, no key)
                 viem ───────── tx submit on Unichain Sepolia
                 LLM ────────── Anthropic / Google / OpenAI (configurable)
                 Telegram ───── escalation messages
@@ -60,7 +60,7 @@ Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Un
 | Agent runtime | Cloudflare Workers + 1 Durable Object (`HydraDO`) |
 | Event bus | Tiny typed `EventEmitter` (no `node:events`) |
 | LLM | Anthropic / Google / OpenAI via Vercel AI SDK (default `claude-sonnet-4-6`; switch via `LLM_PROVIDER`) — prompt caching on Anthropic |
-| Chain interaction | `viem` + `@uniswap/v4-sdk` + Uniswap Pool API |
+| Chain interaction | `viem` + on-chain reads via Uniswap v4 `StateView` (no hosted API dependency) |
 | Network | Unichain Sepolia (chainId 1301) |
 | Storage | D1 (SQLite) — events + decisions persistence |
 | Real-time | Durable Object WebSocket Hibernation API |
@@ -82,7 +82,7 @@ hydra-agent/
 │   │   │   ├── ids.ts              # uuid + event factory
 │   │   │   ├── config.ts           # zod-validated env -> Config
 │   │   │   ├── agents/{base,price,risk,strategy,coordinator,execution}.ts
-│   │   │   ├── chain/{client,pool,position,il,plan,submit}.ts
+│   │   │   ├── chain/{client,pool,position,il,plan,submit,actions,state-view,tick-math,liquidity-amounts,erc20}.ts
 │   │   │   ├── llm/{prompt,client}.ts
 │   │   │   ├── store/d1.ts
 │   │   │   └── bot/telegram.ts
@@ -127,6 +127,8 @@ In `packages/worker/wrangler.toml`:
 - `STATE_VIEW` — the v4 `StateView` lens contract address on Unichain Sepolia (used for fee reads).
 - `TOKEN_ID` — your LP NFT id from PositionManager.
 - `POSITION_TICK_LOWER` / `POSITION_TICK_UPPER` — your position's range. The DO seeds `range` from these on first boot; afterwards the stored value wins (settable at runtime via `POST /admin/range`).
+- `STABLE_CURRENCY` — address of the USD-stable token in the pool (used for fee USD conversion). Leave empty to fall back to "token1 is stable".
+- `SLIPPAGE_BPS` — basis points of slippage tolerance for rebalances (default `50` = 0.5%).
 
 ### 4. Create the D1 database
 

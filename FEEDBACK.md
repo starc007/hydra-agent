@@ -8,9 +8,15 @@ as we integrate the Uniswap API and v4 SDK.
 
 ## What we built on the Uniswap API surface
 
-- **Hosted Pool API** — used for live pool state polling (tick, sqrtPriceX96, liquidity, fee, tickSpacing, token0/token1) on Unichain Sepolia. Polled every 10 seconds from the Durable Object alarm.
-- **`@uniswap/v4-sdk`** — pulled in for tick-math types and `Pool` / `Position` references.
-- **PositionManager ABI** — read `getPositionLiquidity` directly via viem.
+- We initially tried `https://api.uniswap.org/v2/pools/{poolId}?chainId=1301` for live pool state. The endpoint does not exist; `api.uniswap.org` returns `403 Forbidden` for cross-origin callers and `409 ACCESS_DENIED` for direct calls — even with a developer-dashboard API key.
+- We pivoted to **on-chain reads via the v4 `StateView` lens contract**. `getSlot0(poolId)` + `getLiquidity(poolId)` give us live tick / sqrtPriceX96 / liquidity / lpFee with no auth and no rate limit. Token metadata is read directly from the ERC20s on first boot and cached.
+- **`@uniswap/v4-sdk`** — pulled in for tick-math types and `Pool` / `Position` references; we did NOT use it for `modifyLiquidities` encoding because the path was unclear (see below).
+- **PositionManager** — `getPositionLiquidity`, `getPoolAndPositionInfo`, `modifyLiquidities` read/written directly via viem.
+
+## What we wish existed (read-side)
+
+1. A documented public REST endpoint for v4 pool state by `poolId` on every chain Uniswap deploys to. The Trading API only covers swap quoting; there's no equivalent "pool API". On-chain works but is one round-trip per poll.
+2. A clearer signal in the developer dashboard about which products an issued API key can actually access — our key got `403`/`409` on every Trading-API path.
 
 ## Discoverability
 
