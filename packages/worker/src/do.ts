@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import type { PublicClient } from "viem";
 import type { Env, Config } from "./config";
 import { loadConfig } from "./config";
 import { Bus } from "./bus";
@@ -35,6 +36,8 @@ export class HydraDO extends DurableObject<Env> {
   private entryPrice?: number;
   private positionMeta?: import('./chain/position').PositionMetadata;
   private tokenMeta?: { token0: TokenMetadata; token1: TokenMetadata };
+  // Active LP NFT id. Defaults to cfg.TOKEN_ID; replaced (and persisted) after each rebalance mint.
+  private activeTokenId!: bigint;
   private agents: {
     price: PriceAgent;
     risk: RiskAgent;
@@ -64,11 +67,14 @@ export class HydraDO extends DurableObject<Env> {
 
     this.entryPrice = await this.ctx.storage.get<number>("entryPrice");
 
+    const storedTokenId = await this.ctx.storage.get<string>("activeTokenId");
+    this.activeTokenId = storedTokenId ? BigInt(storedTokenId) : this.cfg.TOKEN_ID;
+
     const { publicClient, walletClient, account } = makeClients(this.cfg);
 
     // Read the real position metadata once on boot — overrides POSITION_TICK_* defaults.
     try {
-      this.positionMeta = await readPositionMetadata(publicClient, this.cfg.positionManager, this.cfg.TOKEN_ID);
+      this.positionMeta = await readPositionMetadata(publicClient, this.cfg.positionManager, this.activeTokenId);
       if (!stored) {
         this.range = { tickLower: this.positionMeta.tickLower, tickUpper: this.positionMeta.tickUpper };
       }
@@ -130,7 +136,7 @@ export class HydraDO extends DurableObject<Env> {
             stateView: this.cfg.stateView,
             poolId: this.positionMeta.poolId,
             positionManager: this.cfg.positionManager,
-            tokenId: this.cfg.TOKEN_ID,
+            tokenId: this.activeTokenId,
             tickLower: this.positionMeta.tickLower,
             tickUpper: this.positionMeta.tickUpper,
           });
@@ -183,9 +189,10 @@ export class HydraDO extends DurableObject<Env> {
         hooks: '0x0000000000000000000000000000000000000000' as `0x${string}`,
       },
       poolId: this.positionMeta?.poolId ?? ('0x' + '00'.repeat(32)) as `0x${string}`,
-      tokenId: this.cfg.TOKEN_ID,
+      tokenId: () => this.activeTokenId,
       recipient: account.address,
       slippageBps: this.cfg.SLIPPAGE_BPS,
+      onPositionMinted: async (newTokenId) => { await this.handleNewPosition(newTokenId, publicClient); },
     });
     const execution = new ExecutionAgent(this.bus, submit);
 
@@ -286,6 +293,7 @@ export class HydraDO extends DurableObject<Env> {
       range: this.range,
       entryPrice: this.entryPrice,
       latestPool: this.latestPool,
+      activeTokenId: this.activeTokenId,
       events,
       decisions,
     };
@@ -294,6 +302,49 @@ export class HydraDO extends DurableObject<Env> {
   async setRange(range: Range): Promise<void> {
     this.range = range;
     await this.ctx.storage.put("range", range);
+  }
+
+  /**
+   * Called from the Execution Agent when a REBALANCE tx mints a fresh LP NFT.
+   * Repoints the worker at the new tokenId, refreshes positionMeta + range, and
+   * resets the entry price so the Risk Agent's IL math restarts from the rebalance moment.
+   *
+   * NOTE: Unichain Sepolia's "latest" RPC view can lag the mined block by a few hundred
+   * milliseconds even after waitForTransactionReceipt resolves. PositionInfo for a freshly
+   * minted tokenId may briefly read as all zeros. We retry the read with backoff until we
+   * see a non-degenerate result (or give up after a few attempts).
+   */
+  private async handleNewPosition(newTokenId: bigint, publicClient: PublicClient): Promise<void> {
+    this.activeTokenId = newTokenId;
+    await this.ctx.storage.put("activeTokenId", newTokenId.toString());
+
+    this.entryPrice = undefined;
+    await this.ctx.storage.delete("entryPrice");
+
+    let meta: import('./chain/position').PositionMetadata | undefined;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const m = await readPositionMetadata(publicClient, this.cfg.positionManager, newTokenId);
+        // Reject degenerate state where the RPC hasn't caught up yet.
+        if (m.tickLower !== 0 || m.tickUpper !== 0) {
+          meta = m;
+          break;
+        }
+      } catch (err) {
+        console.error(`[do] readPositionMetadata attempt ${attempt + 1} threw`, err);
+      }
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); // 0.5s, 1s, 1.5s, ...
+    }
+
+    if (!meta) {
+      console.error(`[do] gave up refreshing positionMeta for tokenId=${newTokenId} after retries`);
+      return;
+    }
+
+    this.positionMeta = meta;
+    this.range = { tickLower: meta.tickLower, tickUpper: meta.tickUpper };
+    await this.ctx.storage.put("range", this.range);
+    console.log(`[do] active position is now tokenId=${newTokenId} range=${this.range.tickLower}..${this.range.tickUpper}`);
   }
 
   // ────── WebSocket ──────

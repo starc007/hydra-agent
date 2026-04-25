@@ -26,9 +26,12 @@ export type SubmitDeps = {
   stateView: Address;
   poolKey: PoolKey;
   poolId: `0x${string}`;
-  tokenId: bigint;
+  /** Returns the currently-active LP NFT id. Dynamic so it can change after a rebalance mint. */
+  tokenId: () => bigint;
   recipient: Address;
   slippageBps: number; // e.g. 50 = 0.5%
+  /** Called when wait() observes a fresh ERC721 mint to the recipient (REBALANCE path). */
+  onPositionMinted?: (newTokenId: bigint) => Promise<void> | void;
 };
 
 const BPS = 10_000n;
@@ -51,11 +54,12 @@ export function makeSubmit(deps: SubmitDeps) {
     if (action === 'HOLD') throw new Error('refusing to submit HOLD');
 
     if (action === 'HARVEST') {
+      const tokenId = deps.tokenId();
       // Decrease 0 liquidity → settle accumulated fees → take pair.
       const unlockData = encodeUnlockData(
         [ACTIONS.DECREASE_LIQUIDITY, ACTIONS.TAKE_PAIR],
         [
-          encodeDecreaseLiquidity({ tokenId: deps.tokenId, liquidity: 0n, amount0Min: 0n, amount1Min: 0n }),
+          encodeDecreaseLiquidity({ tokenId, liquidity: 0n, amount0Min: 0n, amount1Min: 0n }),
           encodeTakePair(deps.poolKey.currency0, deps.poolKey.currency1, deps.recipient),
         ],
       );
@@ -63,12 +67,13 @@ export function makeSubmit(deps: SubmitDeps) {
     }
 
     if (action === 'EXIT') {
-      const liquidity = await readPositionLiquidity(deps.publicClient, deps.positionManager, deps.tokenId);
+      const tokenId = deps.tokenId();
+      const liquidity = await readPositionLiquidity(deps.publicClient, deps.positionManager, tokenId);
       const unlockData = encodeUnlockData(
         [ACTIONS.DECREASE_LIQUIDITY, ACTIONS.BURN_POSITION, ACTIONS.TAKE_PAIR],
         [
-          encodeDecreaseLiquidity({ tokenId: deps.tokenId, liquidity, amount0Min: 0n, amount1Min: 0n }),
-          encodeBurnPosition({ tokenId: deps.tokenId, amount0Min: 0n, amount1Min: 0n }),
+          encodeDecreaseLiquidity({ tokenId, liquidity, amount0Min: 0n, amount1Min: 0n }),
+          encodeBurnPosition({ tokenId, amount0Min: 0n, amount1Min: 0n }),
           encodeTakePair(deps.poolKey.currency0, deps.poolKey.currency1, deps.recipient),
         ],
       );
@@ -76,9 +81,10 @@ export function makeSubmit(deps: SubmitDeps) {
     }
 
     if (action === 'REBALANCE') {
+      const tokenId = deps.tokenId();
       const [{ slot0 }, oldLiquidity] = await Promise.all([
         readPoolSlot({ client: deps.publicClient, stateView: deps.stateView, poolId: deps.poolId }),
-        readPositionLiquidity(deps.publicClient, deps.positionManager, deps.tokenId),
+        readPositionLiquidity(deps.publicClient, deps.positionManager, tokenId),
       ]);
 
       // Re-read position ticks to avoid stale boot values.
@@ -86,7 +92,7 @@ export function makeSubmit(deps: SubmitDeps) {
         address: deps.positionManager,
         abi: POSITION_MANAGER_ABI,
         functionName: 'getPoolAndPositionInfo',
-        args: [deps.tokenId],
+        args: [tokenId],
       }) as [unknown, bigint];
       const tickLowerOld = Number(BigInt.asIntN(24, (info >> 8n) & 0xFFFFFFn));
       const tickUpperOld = Number(BigInt.asIntN(24, (info >> 32n) & 0xFFFFFFn));
@@ -115,7 +121,7 @@ export function makeSubmit(deps: SubmitDeps) {
       const unlockData = encodeUnlockData(
         [ACTIONS.DECREASE_LIQUIDITY, ACTIONS.MINT_POSITION, ACTIONS.SETTLE_PAIR, ACTIONS.TAKE_PAIR],
         [
-          encodeDecreaseLiquidity({ tokenId: deps.tokenId, liquidity: oldLiquidity, amount0Min, amount1Min }),
+          encodeDecreaseLiquidity({ tokenId, liquidity: oldLiquidity, amount0Min, amount1Min }),
           encodeMintPosition({
             poolKey: deps.poolKey,
             tickLower: newRange.tickLower,
@@ -137,7 +143,29 @@ export function makeSubmit(deps: SubmitDeps) {
 
   async function wait(hash: `0x${string}`) {
     const r = await deps.publicClient.waitForTransactionReceipt({ hash });
-    return { gasUsed: r.gasUsed.toString(), blockNumber: Number(r.blockNumber) };
+
+    // If this tx minted a fresh position NFT to our recipient, surface the new tokenId.
+    // ERC721 Transfer(from, to, tokenId) — topic[0] is the canonical Transfer signature,
+    // topic[1] = padded `from`, topic[2] = padded `to`, topic[3] = tokenId.
+    const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    const recipientPadded = `0x${'0'.repeat(24)}${deps.recipient.slice(2).toLowerCase()}`;
+    const mintLog = r.logs.find(
+      (l) =>
+        l.address.toLowerCase() === deps.positionManager.toLowerCase()
+        && l.topics?.[0] === TRANSFER_TOPIC
+        && /^0x0+$/.test(l.topics?.[1] ?? '')
+        && (l.topics?.[2] ?? '').toLowerCase() === recipientPadded
+        && l.topics?.[3] !== undefined,
+    );
+    let mintedTokenId: bigint | undefined;
+    if (mintLog && mintLog.topics?.[3]) {
+      mintedTokenId = BigInt(mintLog.topics[3]);
+      if (deps.onPositionMinted) {
+        try { await deps.onPositionMinted(mintedTokenId); }
+        catch (err) { console.error('[submit] onPositionMinted callback threw', err); }
+      }
+    }
+    return { gasUsed: r.gasUsed.toString(), blockNumber: Number(r.blockNumber), mintedTokenId };
   }
 
   return { submit, wait };
