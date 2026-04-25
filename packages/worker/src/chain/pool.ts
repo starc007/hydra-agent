@@ -1,40 +1,40 @@
-import type { Config } from '../config';
+import type { Address, Hex, PublicClient } from 'viem';
+import type { TokenMetadata } from './erc20';
+import { readPoolSlot } from './state-view';
 
 export type PoolState = {
-  poolId: `0x${string}`;
+  poolId: Hex;
   tick: number;
   sqrtPriceX96: bigint;
   liquidity: bigint;
-  fee: number;
-  tickSpacing: number;
-  token0: { address: `0x${string}`; symbol: string; decimals: number };
-  token1: { address: `0x${string}`; symbol: string; decimals: number };
+  fee: number;          // pool's lpFee from slot0
+  tickSpacing: number;  // from PoolKey (cached on boot)
+  token0: TokenMetadata;
+  token1: TokenMetadata;
 };
 
-export async function fetchPoolState(cfg: Config): Promise<PoolState> {
-  const url = `${cfg.UNISWAP_API_BASE}/v2/pools/${cfg.POOL_ID}?chainId=${cfg.CHAIN_ID}`;
-  const headers: Record<string, string> = { accept: 'application/json' };
-  if (cfg.UNISWAP_API_KEY) headers['x-api-key'] = cfg.UNISWAP_API_KEY;
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`Uniswap API ${res.status}: ${await res.text()}`);
-  const j = await res.json() as {
-    tick: number | string;
-    sqrtPriceX96: string;
-    liquidity: string;
-    fee: number | string;
-    tickSpacing: number | string;
-    token0: { address: `0x${string}`; symbol: string; decimals: number };
-    token1: { address: `0x${string}`; symbol: string; decimals: number };
-  };
+/**
+ * Reads live pool state via the StateView lens contract (no HTTP, no API key).
+ * tickSpacing + token metadata are passed in (they are immutable per pool, cached on boot).
+ */
+export async function fetchPoolState(args: {
+  client: PublicClient;
+  stateView: Address;
+  poolId: Hex;
+  tickSpacing: number;
+  token0: TokenMetadata;
+  token1: TokenMetadata;
+}): Promise<PoolState> {
+  const { slot0, liquidity } = await readPoolSlot({ client: args.client, stateView: args.stateView, poolId: args.poolId });
   return {
-    poolId: cfg.poolId,
-    tick: Number(j.tick),
-    sqrtPriceX96: BigInt(j.sqrtPriceX96),
-    liquidity: BigInt(j.liquidity),
-    fee: Number(j.fee),
-    tickSpacing: Number(j.tickSpacing),
-    token0: j.token0,
-    token1: j.token1,
+    poolId: args.poolId,
+    tick: slot0.tick,
+    sqrtPriceX96: slot0.sqrtPriceX96,
+    liquidity,
+    fee: slot0.lpFee,
+    tickSpacing: args.tickSpacing,
+    token0: args.token0,
+    token1: args.token1,
   };
 }
 

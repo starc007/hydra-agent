@@ -30,6 +30,23 @@ export const STATE_VIEW_ABI = [
       { name: 'feeGrowthInside1LastX128', type: 'uint256' },
     ],
   },
+  {
+    type: 'function', name: 'getSlot0',
+    stateMutability: 'view',
+    inputs: [{ name: 'poolId', type: 'bytes32' }],
+    outputs: [
+      { name: 'sqrtPriceX96', type: 'uint160' },
+      { name: 'tick', type: 'int24' },
+      { name: 'protocolFee', type: 'uint24' },
+      { name: 'lpFee', type: 'uint24' },
+    ],
+  },
+  {
+    type: 'function', name: 'getLiquidity',
+    stateMutability: 'view',
+    inputs: [{ name: 'poolId', type: 'bytes32' }],
+    outputs: [{ name: 'liquidity', type: 'uint128' }],
+  },
 ] as const;
 
 const Q128 = 1n << 128n;
@@ -74,5 +91,19 @@ export async function readPositionFees(args: {
   return {
     fees0: (delta0 * liquidity) / Q128,
     fees1: (delta1 * liquidity) / Q128,
+  };
+}
+
+export type Slot0 = { sqrtPriceX96: bigint; tick: number; protocolFee: number; lpFee: number };
+
+export async function readPoolSlot(args: { client: PublicClient; stateView: Address; poolId: Hex }): Promise<{ slot0: Slot0; liquidity: bigint }> {
+  const [slot0Raw, liquidity] = await Promise.all([
+    args.client.readContract({ address: args.stateView, abi: STATE_VIEW_ABI, functionName: 'getSlot0', args: [args.poolId] }),
+    args.client.readContract({ address: args.stateView, abi: STATE_VIEW_ABI, functionName: 'getLiquidity', args: [args.poolId] }),
+  ]);
+  const [sqrtPriceX96, tick, protocolFee, lpFee] = slot0Raw as [bigint, number, number, number];
+  return {
+    slot0: { sqrtPriceX96, tick: Number(tick), protocolFee: Number(protocolFee), lpFee: Number(lpFee) },
+    liquidity: liquidity as bigint,
   };
 }
