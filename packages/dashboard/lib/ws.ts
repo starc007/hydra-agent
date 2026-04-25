@@ -2,7 +2,6 @@
 import { useEffect, useState } from 'react';
 
 export type AgentName = 'price' | 'risk' | 'strategy' | 'coordinator' | 'execution' | 'bot';
-
 export type HydraEvent = {
   id: string;
   ts: number;
@@ -10,10 +9,10 @@ export type HydraEvent = {
   type: string;
   payload: Record<string, unknown>;
 };
-
 export type Snapshot = {
   range: { tickLower: number; tickUpper: number };
   entryPrice?: number;
+  activeTokenId?: string;
   latestPool?: {
     tick: number;
     sqrtPriceX96: string;
@@ -25,7 +24,6 @@ export type Snapshot = {
   events: HydraEvent[];
   decisions: DecisionRow[];
 };
-
 export type DecisionRow = {
   id: string;
   ts: number;
@@ -37,48 +35,48 @@ export type DecisionRow = {
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? 'http://localhost:8787';
 
-function wsUrl(): string {
+function wsUrl(doId: string): string {
   const u = new URL(BACKEND);
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
   u.pathname = '/ws';
+  u.searchParams.set('do', doId);
   return u.toString();
 }
 
-export function useEventStream(max = 200): HydraEvent[] {
+export function useEventStream(doId: string | null, max = 200): HydraEvent[] {
   const [events, setEvents] = useState<HydraEvent[]>([]);
   useEffect(() => {
+    if (!doId) return;
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      ws = new WebSocket(wsUrl());
+      ws = new WebSocket(wsUrl(doId));
       ws.onmessage = (m) => {
         try {
           const e: HydraEvent = JSON.parse(m.data as string);
           setEvents((prev) => [e, ...prev].slice(0, max));
-        } catch { /* ignore malformed */ }
+        } catch { /* ignore */ }
       };
       ws.onclose = () => { retry = setTimeout(connect, 2000); };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
     connect();
-    return () => {
-      ws?.close();
-      if (retry) clearTimeout(retry);
-    };
-  }, [max]);
+    return () => { ws?.close(); if (retry) clearTimeout(retry); };
+  }, [doId, max]);
   return events;
 }
 
-export function useSnapshot(): { data: Snapshot | null; loading: boolean; error: string | null } {
+export function useSnapshot(doId: string | null): { data: Snapshot | null; loading: boolean; error: string | null } {
   const [data, setData] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    if (!doId) { setLoading(false); return; }
     let alive = true;
     const fetcher = async () => {
       try {
-        const res = await fetch(`${BACKEND}/api/snapshot`);
+        const res = await fetch(`${BACKEND}/api/snapshot?do=${doId}`);
         if (!res.ok) throw new Error(`snapshot ${res.status}`);
         const j = (await res.json()) as Snapshot;
         if (alive) setData(j);
@@ -91,7 +89,7 @@ export function useSnapshot(): { data: Snapshot | null; loading: boolean; error:
     void fetcher();
     const id = setInterval(fetcher, 5000);
     return () => { alive = false; clearInterval(id); };
-  }, []);
+  }, [doId]);
   return { data, loading, error };
 }
 
