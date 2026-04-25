@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export const STRATEGY_SYSTEM = `You are the Strategy Agent inside Hydra, a multi-agent system that manages a Uniswap v4 LP position.
 
 Inputs you receive:
@@ -25,20 +27,14 @@ export function buildUserMessage(ctx: { events: unknown[]; position: unknown }):
   return `## Recent events\n${JSON.stringify(ctx.events, null, 2)}\n\n## Position\n${JSON.stringify(ctx.position, null, 2)}`;
 }
 
-export const RECOMMEND_TOOL = {
-  name: 'recommend_action',
-  description: 'Submit a strategy recommendation',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      action: { type: 'string', enum: ['HOLD', 'REBALANCE', 'HARVEST', 'EXIT'] },
-      confidence: { type: 'number', minimum: 0, maximum: 1 },
-      rationale: { type: 'string' },
-      suggestedRange: {
-        type: 'object',
-        properties: { tickLower: { type: 'number' }, tickUpper: { type: 'number' } },
-      },
-    },
-    required: ['action', 'confidence', 'rationale'],
-  },
-} as const;
+export const RecommendSchema = z.object({
+  action: z.enum(['HOLD', 'REBALANCE', 'HARVEST', 'EXIT']),
+  confidence: z.number().min(0).max(1),
+  rationale: z.string(),
+  suggestedRange: z.object({
+    tickLower: z.number(),
+    tickUpper: z.number(),
+  }).optional(),
+});
+
+export type RecommendOutput = z.infer<typeof RecommendSchema>;

@@ -1,10 +1,10 @@
 import { BaseAgent } from './base';
 import type { Bus } from '../bus';
 import type { AgentName, HydraEvent } from '../events';
-import type { ClaudeClient } from '../llm/claude';
+import type { LLMClient } from '../llm/client';
 
 export type StrategyAgentDeps = {
-  client: Pick<ClaudeClient, 'recommend'>;
+  client: Pick<LLMClient, 'recommend'>;
   getPosition: () => unknown;
   triggerTypes?: HydraEvent['type'][];
 };
