@@ -42,7 +42,9 @@ export default {
 
     if (url.pathname === '/api/snapshot') {
       const snap = await singleton(env).snapshot();
-      return Response.json(snap, { headers: cors });
+      // latestPool carries bigints (sqrtPriceX96, liquidity); serialize them as strings.
+      const body = JSON.stringify(snap, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+      return new Response(body, { headers: { ...cors, 'content-type': 'application/json' } });
     }
 
     if (url.pathname === '/admin/force' && req.method === 'POST') {

@@ -14,7 +14,7 @@ new_sqlite_classes = ["HydraDO"]
 [[d1_databases]]
 binding = "DB"
 database_name = "hydra"
-database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+database_id = "874360ea-73e5-4ad6-9ba4-71a6a156e308"
 migrations_dir = "migrations"
 
 [triggers]
@@ -24,16 +24,16 @@ crons = ["* * * * *"]
 LLM_PROVIDER = "google"
 RPC_URL = "https://sepolia.unichain.org"
 CHAIN_ID = "1301"
-POOL_ID = "REPLACE_AT_TASK_4_0"
-POSITION_MANAGER = "REPLACE_AT_TASK_4_0"
-STATE_VIEW = "REPLACE_WITH_STATE_VIEW_ADDRESS"
-TOKEN_ID = "0"
-POSITION_TICK_LOWER = "-887200"
-POSITION_TICK_UPPER = "887200"
+POOL_ID = "0x8900c1488d225265cebb887956d376b4e303232d2ba0fb76c297130a143ff4d6"
+POSITION_MANAGER = "0xf969aee60879c54baaed9f3ed26147db216fd664"
+STATE_VIEW = "0xc199f1072a74d4e905aba1a84d9a45e2546b6222"
+TOKEN_ID = "7464"
+POSITION_TICK_LOWER = "-600"
+POSITION_TICK_UPPER = "600"
 DASHBOARD_ORIGIN = "*"
 SLIPPAGE_BPS = "50"
-# Set STABLE_CURRENCY to the address of the USD-stable token in the pool, or leave empty to treat token1 as stable.
-STABLE_CURRENCY = ""
+# TKB (token1 in our pool) used as the symbolic stable for USD-fee conversion.
+STABLE_CURRENCY = "0x6B8Ec67c66179cfe9817c3eE48FbF2DA8E9E09Fb"
 IL_THRESHOLD_PCT = "2.5"
 DAILY_TX_CAP = "10"
 COOLDOWN_SEC = "300"
