@@ -10,6 +10,8 @@ export async function sendEscalation(cfg: TelegramConfig, e: Escalate): Promise<
     `Recommendation: *${e.payload.recommendation.action}* (conf ${(e.payload.recommendation.confidence * 100).toFixed(0)}%)\n` +
     `_${e.payload.recommendation.rationale}_`;
   const correlate = e.payload.correlatesTo;
+  // callback_data = "approve:<correlatesTo>" or "override:<correlatesTo>"
+  // correlatesTo is a UUID (36 chars); "approve:" prefix = 8 chars → total 44 chars, well under the 64-byte Telegram limit.
   const body = {
     chat_id: cfg.chatId,
     text,
@@ -37,8 +39,30 @@ export async function answerCallback(cfg: TelegramConfig, callbackQueryId: strin
   });
 }
 
-export function attachTelegramSender(bus: Bus, cfg: TelegramConfig): () => void {
-  return bus.on('ESCALATE', (e) => { void sendEscalation(cfg, e); });
+/**
+ * Attach a listener that:
+ * 1. Writes correlatesTo → doId mapping to D1 escalations table.
+ * 2. Sends the Telegram escalation message.
+ */
+export function attachTelegramSender(
+  bus: Bus,
+  cfg: TelegramConfig,
+  doId: string,
+  db: D1Database,
+): () => void {
+  return bus.on('ESCALATE', (e) => {
+    void (async () => {
+      try {
+        await db
+          .prepare('INSERT OR REPLACE INTO escalations (correlates_to, do_id, ts) VALUES (?, ?, ?)')
+          .bind(e.payload.correlatesTo, doId, e.ts)
+          .run();
+      } catch (err) {
+        console.error('[telegram] failed to write escalation mapping', err);
+      }
+      void sendEscalation(cfg, e);
+    })();
+  });
 }
 
 export function parseCallback(update: unknown): {
@@ -57,7 +81,10 @@ export function parseCallback(update: unknown): {
   };
   const cq = u?.callback_query;
   if (!cq || typeof cq.data !== 'string') return null;
-  const [decision, correlatesTo] = cq.data.split(':');
+  const colonIdx = cq.data.indexOf(':');
+  if (colonIdx === -1) return null;
+  const decision = cq.data.slice(0, colonIdx);
+  const correlatesTo = cq.data.slice(colonIdx + 1);
   if (decision !== 'approve' && decision !== 'override') return null;
   return {
     decision,
