@@ -1,0 +1,35 @@
+name = "hydra"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "HYDRA"
+class_name = "HydraDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["HydraDO"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hydra"
+database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+RPC_URL = "https://sepolia.unichain.org"
+CHAIN_ID = "1301"
+POOL_ID = "REPLACE_AT_TASK_4_0"
+POSITION_MANAGER = "REPLACE_AT_TASK_4_0"
+TOKEN_ID = "0"
+UNISWAP_API_BASE = "https://api.uniswap.org"
+DASHBOARD_ORIGIN = "*"
+IL_THRESHOLD_PCT = "2.5"
+DAILY_TX_CAP = "10"
+COOLDOWN_SEC = "300"
+MIN_CONFIDENCE = "0.7"
+TICK_INTERVAL_MS = "10000"
