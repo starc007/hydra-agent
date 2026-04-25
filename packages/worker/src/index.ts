@@ -41,6 +41,53 @@ function jsonResponse(body: unknown, headers: Record<string, string>): Response 
   });
 }
 
+async function previewPosition(env: Env, wallet: string, tokenIdStr: string) {
+  const { createPublicClient, http } = await import('viem');
+  const { readPositionMetadata } = await import('./chain/position');
+  const { readErc20Metadata } = await import('./chain/erc20');
+
+  // Public client only — no private key needed for read-only validation.
+  const publicClient = createPublicClient({
+    transport: http(env.RPC_URL),
+  });
+
+  const tokenId = BigInt(tokenIdStr);
+  const positionManager = env.POSITION_MANAGER as `0x${string}`;
+  const walletLower = wallet.toLowerCase();
+
+  // Validate ownership
+  const owner = (await publicClient.readContract({
+    address: positionManager,
+    abi: [{
+      type: 'function', name: 'ownerOf', stateMutability: 'view',
+      inputs: [{ name: 'tokenId', type: 'uint256' }],
+      outputs: [{ type: 'address' }],
+    }],
+    functionName: 'ownerOf',
+    args: [tokenId],
+  })) as `0x${string}`;
+  if (owner.toLowerCase() !== walletLower) {
+    throw new Error(`tokenId ${tokenIdStr} is owned by ${owner}, not ${wallet}`);
+  }
+
+  const meta = await readPositionMetadata(publicClient as any, positionManager, tokenId);
+  const [token0, token1] = await Promise.all([
+    readErc20Metadata(publicClient as any, meta.poolKey.currency0),
+    readErc20Metadata(publicClient as any, meta.poolKey.currency1),
+  ]);
+
+  return {
+    owner,
+    tokenId: tokenIdStr,
+    poolKey: meta.poolKey,
+    poolId: meta.poolId,
+    tickLower: meta.tickLower,
+    tickUpper: meta.tickUpper,
+    token0,
+    token1,
+  };
+}
+
 export default {
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
@@ -111,6 +158,24 @@ export default {
         list.map((u) => ({ doId: u.doId, wallet: u.wallet, tokenId: u.tokenId })),
         cors,
       );
+    }
+
+    // ── GET /api/preview-position?wallet=<addr>&tokenId=<id> ──────────────────
+    if (url.pathname === '/api/preview-position') {
+      const wallet = url.searchParams.get('wallet');
+      const tokenIdStr = url.searchParams.get('tokenId');
+      if (!wallet || !tokenIdStr) {
+        return jsonResponse({ error: 'wallet and tokenId required' }, cors);
+      }
+      try {
+        const preview = await previewPosition(env, wallet, tokenIdStr);
+        return jsonResponse(preview, cors);
+      } catch (err) {
+        return jsonResponse(
+          { error: err instanceof Error ? err.message : String(err) },
+          { ...cors, 'cache-control': 'no-store' },
+        );
+      }
     }
 
     // Routes below require ?do=
