@@ -11,8 +11,11 @@
     "telegram:setwebhook": "tsx scripts/set-webhook.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@ai-sdk/anthropic": "latest",
+    "@ai-sdk/google": "latest",
+    "@ai-sdk/openai": "latest",
     "@uniswap/v4-sdk": "^1.13.0",
+    "ai": "latest",
     "viem": "^2.25.0",
     "zod": "^3.23.8"
   },
