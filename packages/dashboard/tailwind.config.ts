@@ -1,8 +1,12 @@
 import type { Config } from 'tailwindcss';
 
 const config: Config = {
-  content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
+  content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}', './lib/**/*.{ts,tsx}'],
   darkMode: 'class',
+  safelist: [
+    'bg-agent-price', 'bg-agent-risk', 'bg-agent-strategy',
+    'bg-agent-coordinator', 'bg-agent-execution', 'bg-agent-bot',
+  ],
   theme: {
     extend: {
       colors: {
