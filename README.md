@@ -4,8 +4,6 @@
 
 Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Unichain Sepolia. They communicate over an in-process event bus inside a single Durable Object, reach consensus, then execute on-chain via viem. When the agents disagree or threshold rules trip, a human gets pinged on Telegram.
 
-Built for [Open Agents by ETHGlobal](https://ethglobal.com/events/agents) — targeting the Uniswap Foundation prize for best Uniswap API integration.
-
 ---
 
 ## Architecture
@@ -96,8 +94,7 @@ hydra-agent/
 │       ├── components/{agent-status,live-feed,position-panel,decision-log}.tsx
 │       ├── lib/ws.ts               # WS hook + snapshot fetch
 │       └── wrangler.toml
-├── docs/superpowers/plans/2026-04-25-hydra.md
-├── FEEDBACK.md                 # Uniswap DX feedback (required for prize)
+├── FEEDBACK.md                 # Uniswap API + v4 SDK DX notes
 └── README.md
 ```
 
@@ -196,11 +193,11 @@ npm run deploy
    - Execution agent emits `TX_SUBMITTED` → `TX_CONFIRMED`
 4. Tx hash is visible at `https://sepolia.uniscan.xyz/tx/<hash>`.
 
-## Why it fits Open Agents
+## Why this design
 
 - **Reliability** — five specialized agents with narrow scopes. Each can be reasoned about and replaced independently.
 - **Transparency** — every agent emit is persisted to D1 and fanned out over WebSocket. The dashboard is a thin renderer of the same event stream.
 - **Composability** — agents are constructed with dependency-injection-shaped deps (`fetcher`, `sample`, `submit`, `client`). Swap any of them without touching the others.
-- **Cloudflare-native** — one Durable Object, one D1, one Pages deployment. No long-running boxes, no queues to babysit, free tier covers the demo.
+- **Cloudflare-native** — one Durable Object, one D1, one Pages deployment. No long-running boxes, no queues to babysit, free tier covers it.
 
 See `FEEDBACK.md` for our notes on the Uniswap API + v4 SDK developer experience.

@@ -2,9 +2,9 @@
 
 ## Context
 
-Hydra is a multi-agent LP coordinator built for Open Agents (ETHGlobal),
-deployed entirely on Cloudflare (Workers + Durable Object + D1 + Pages).
-This file logs DX observations as we integrate the Uniswap API and v4 SDK.
+Hydra is a multi-agent LP coordinator deployed entirely on Cloudflare
+(Workers + Durable Object + D1 + Pages). This file logs DX observations
+as we integrate the Uniswap API and v4 SDK.
 
 ## What we built on the Uniswap API surface
 
@@ -19,8 +19,8 @@ This file logs DX observations as we integrate the Uniswap API and v4 SDK.
 
 ## v4 SDK ergonomics
 
-- The biggest friction was building the `modifyLiquidities` call for rebalance / harvest / exit. We could not, in the time available, confidently assemble the `(actions, params)` byte string from the SDK alone — the path from `Position` / `Pool` objects to encoded calldata was not obvious from the README, and signature differences between minor versions added uncertainty.
-- For the hackathon demo, we ship a minimal ETH self-transfer in the Execution Agent so that the dashboard shows a real on-chain confirmation per approved action. The agent coordination story is unaffected — only the encoded call is a placeholder.
+- The biggest friction was building the `modifyLiquidities` call for rebalance / harvest / exit. The path from `Position` / `Pool` objects to encoded calldata was not obvious from the README, and signature differences between minor versions added uncertainty.
+- For now the Execution Agent ships a minimal ETH self-transfer so that the dashboard shows a real on-chain confirmation per approved action. The agent coordination story is unaffected — only the encoded call is a placeholder pending a cleaner v4 encoding path.
 - A `buildRebalance(poolKey, tokenId, newRange, recipient)` helper that returned `{ to, data, value }` ready for `sendTransaction` would have unblocked us in a single afternoon.
 
 ## Endpoint coverage
