@@ -121,22 +121,33 @@ export default {
           { ...cors, 'cache-control': 'no-store' },
         );
       }
-      const wallet = body.wallet.toLowerCase() as `0x${string}`;
+      // Derive the owner wallet from the PK so we can address the correct DO before calling it.
+      const { privateKeyToAccount } = await import('viem/accounts');
+      const signerWallet = body.wallet.toLowerCase() as `0x${string}`;
+      const ownerWallet = privateKeyToAccount(body.privateKey as `0x${string}`).address.toLowerCase() as `0x${string}`;
       const sessionToken = randomToken();
       const sessionTokenHash = await sha256Hex(sessionToken);
-      const doId = deriveDoId(wallet, BigInt(body.tokenId));
+      const doId = deriveDoId(ownerWallet, BigInt(body.tokenId));
       try {
         const stub = doStub(env, doId);
         const result = await stub.register({
-          wallet,
+          signerWallet,
           tokenId: body.tokenId,
           privateKey: body.privateKey as `0x${string}`,
           telegramChatId: body.telegramChatId,
           stableCurrency: body.stableCurrency,
           sessionTokenHash,
         });
-        await upsertUser(env.DB, { doId: result.doId, wallet, tokenId: body.tokenId });
-        return jsonResponse({ doId: result.doId, sessionToken, range: result.range }, cors);
+        await upsertUser(env.DB, {
+          doId: result.doId,
+          wallet: result.ownerWallet,
+          signerWallet,
+          tokenId: body.tokenId,
+        });
+        return jsonResponse(
+          { doId: result.doId, sessionToken, range: result.range, ownerWallet: result.ownerWallet },
+          cors,
+        );
       } catch (err) {
         return jsonResponse(
           { error: String(err instanceof Error ? err.message : err) },
@@ -162,7 +173,7 @@ export default {
       const list = await listAllUsers(env.DB);
       // Return only non-PII fields
       return jsonResponse(
-        list.map((u) => ({ doId: u.doId, wallet: u.wallet, tokenId: u.tokenId })),
+        list.map((u) => ({ doId: u.doId, wallet: u.wallet, signerWallet: u.signerWallet, tokenId: u.tokenId })),
         cors,
       );
     }
@@ -202,10 +213,12 @@ export default {
       if (!body.wallet || !body.tokenId || !body.privateKey) {
         return jsonResponse({ error: 'wallet, tokenId, and privateKey are required' }, cors);
       }
-      const wallet = body.wallet.toLowerCase() as `0x${string}`;
+      // Owner wallet is derived from PK — address the DO at the owner-derived doId.
+      const { privateKeyToAccount: pkToAccount } = await import('viem/accounts');
+      const ownerWallet = pkToAccount(body.privateKey as `0x${string}`).address.toLowerCase() as `0x${string}`;
       const sessionToken = randomToken();
       const sessionTokenHash = await sha256Hex(sessionToken);
-      const doId = deriveDoId(wallet, BigInt(body.tokenId));
+      const doId = deriveDoId(ownerWallet, BigInt(body.tokenId));
       try {
         const stub = doStub(env, doId);
         const out = await stub.resume({ privateKey: body.privateKey as `0x${string}`, sessionTokenHash });
@@ -224,16 +237,32 @@ export default {
         doId?: string;
         telegramChatId?: string | null;
         stableCurrency?: string | null;
+        tokenId?: string;
+        privateKey?: string;
       };
       const session = req.headers.get('x-hydra-session') ?? '';
       if (!body.doId) return jsonResponse({ error: 'doId required' }, cors);
       const sessionTokenHash = await sha256Hex(session);
       try {
-        await doStub(env, body.doId).updateSettings({
+        const result = await doStub(env, body.doId).updateSettings({
           sessionTokenHash,
           telegramChatId: body.telegramChatId,
           stableCurrency: body.stableCurrency,
+          tokenId: body.tokenId,
+          privateKey: body.privateKey as `0x${string}` | undefined,
         });
+        // When owner or tokenId changed, refresh the D1 index row so /api/lookup stays correct.
+        if (result.ownerWallet && result.tokenId) {
+          // Derive the current signer wallet from the lookup row (it doesn't change on update).
+          const existing = await findByWallet(env.DB, result.ownerWallet);
+          const signerWallet = existing[0]?.signerWallet ?? result.ownerWallet;
+          await upsertUser(env.DB, {
+            doId: body.doId,
+            wallet: result.ownerWallet,
+            signerWallet,
+            tokenId: result.tokenId,
+          });
+        }
         return jsonResponse({ ok: true }, cors);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

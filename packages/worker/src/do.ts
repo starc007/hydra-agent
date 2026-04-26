@@ -65,20 +65,17 @@ export class HydraDO extends DurableObject<Env> {
   // ────── registration ──────
 
   async register(args: {
-    wallet: `0x${string}`;
+    signerWallet: `0x${string}`;  // connected wallet from dashboard (for indexing)
     tokenId: string;
     privateKey: `0x${string}`;
     telegramChatId?: string;
     stableCurrency?: string;
     sessionTokenHash: string;
-  }): Promise<{ doId: string; range: Range }> {
-    // Validate that the private key derives the wallet
-    const derived = privateKeyToAccount(args.privateKey).address.toLowerCase();
-    if (derived !== args.wallet.toLowerCase()) {
-      throw new Error('private key does not match wallet address');
-    }
+  }): Promise<{ doId: string; ownerWallet: `0x${string}`; range: Range }> {
+    // Derive the owner from the supplied private key — no enforcement against signerWallet.
+    const ownerWallet = privateKeyToAccount(args.privateKey).address.toLowerCase() as `0x${string}`;
 
-    // Validate ownership and read position metadata in one pass.
+    // Validate ownership of the LP NFT by the PK-derived wallet.
     const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
     const tokenId = BigInt(args.tokenId);
     const ownerOf = (await publicClient.readContract({
@@ -87,8 +84,8 @@ export class HydraDO extends DurableObject<Env> {
       functionName: 'ownerOf',
       args: [tokenId],
     })) as `0x${string}`;
-    if (ownerOf.toLowerCase() !== args.wallet.toLowerCase()) {
-      throw new Error('wallet does not own this LP NFT');
+    if (ownerOf.toLowerCase() !== ownerWallet) {
+      throw new Error(`tokenId ${args.tokenId} is owned by ${ownerOf}, not ${ownerWallet} (derived from PK)`);
     }
 
     // Best-effort metadata read — gives the dashboard the real range immediately.
@@ -102,14 +99,14 @@ export class HydraDO extends DurableObject<Env> {
     }
 
     const user: StoredUser = {
-      wallet: args.wallet,
+      wallet: ownerWallet,
       tokenId: args.tokenId,
       privateKey: args.privateKey,
       telegramChatId: args.telegramChatId,
       stableCurrency: args.stableCurrency,
       sessionTokenHash: args.sessionTokenHash,
     };
-    this.doId = deriveDoId(args.wallet, tokenId);
+    this.doId = deriveDoId(ownerWallet, tokenId);
     this.activeTokenId = tokenId;
     this.user = user;
     this.range = initialRange;
@@ -129,7 +126,7 @@ export class HydraDO extends DurableObject<Env> {
     this.agents = null;
     await this.ctx.storage.setAlarm(Date.now() + 1000);
 
-    return { doId: this.doId, range: initialRange };
+    return { doId: this.doId, ownerWallet, range: initialRange };
   }
 
   async unregister(): Promise<void> {
@@ -514,25 +511,63 @@ export class HydraDO extends DurableObject<Env> {
     sessionTokenHash: string;
     telegramChatId?: string | null;
     stableCurrency?: string | null;
-  }): Promise<{ ok: true }> {
+    tokenId?: string;           // rotate to a different LP position
+    privateKey?: `0x${string}`; // rotate to a different signing key (may change owner)
+  }): Promise<{ ok: true; ownerWallet?: `0x${string}`; tokenId?: string }> {
     this.user = (await this.ctx.storage.get<StoredUser>('user')) ?? this.user;
     if (!this.user) throw new Error('not_registered');
     if (this.user.sessionTokenHash !== args.sessionTokenHash) throw new Error('forbidden');
 
+    const nextPrivateKey = args.privateKey ?? this.user.privateKey;
+    const nextTokenId = args.tokenId ?? this.user.tokenId;
+    const newOwner = privateKeyToAccount(nextPrivateKey).address.toLowerCase() as `0x${string}`;
+
+    const pkChanged = args.privateKey != null;
+    const tokenChanged = args.tokenId != null && args.tokenId !== this.user.tokenId;
+
+    // Re-validate ownership when PK or tokenId changes.
+    if (pkChanged || tokenChanged) {
+      const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: nextPrivateKey });
+      const owner = (await publicClient.readContract({
+        address: this.cfg.positionManager,
+        abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view',
+          inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
+        functionName: 'ownerOf',
+        args: [BigInt(nextTokenId)],
+      })) as `0x${string}`;
+      if (owner.toLowerCase() !== newOwner) {
+        throw new Error(`tokenId ${nextTokenId} is owned by ${owner}, not ${newOwner} (derived from PK)`);
+      }
+    }
+
     const next: StoredUser = {
       ...this.user,
+      privateKey: nextPrivateKey,
+      tokenId: nextTokenId,
+      wallet: newOwner,
       telegramChatId: args.telegramChatId === null ? undefined : args.telegramChatId ?? this.user.telegramChatId,
       stableCurrency: args.stableCurrency === null ? undefined : args.stableCurrency ?? this.user.stableCurrency,
     };
-    this.user = next;
-    await this.ctx.storage.put('user', next);
 
-    // Force re-boot so Telegram listener and stable-currency wiring pick up new values on next alarm.
+    // Capture tokenChanged before we mutate this.user.
+    if (tokenChanged) {
+      this.activeTokenId = BigInt(nextTokenId);
+      await this.ctx.storage.delete('range');
+      await this.ctx.storage.delete('entryPrice');
+      await this.ctx.storage.put({ user: next, activeTokenId: nextTokenId });
+    } else {
+      await this.ctx.storage.put('user', next);
+    }
+    this.user = next;
+
+    // Force re-boot so agents pick up new keys / chat id / stable currency.
     this.booted = false;
     this.agents = null;
     await this.ctx.storage.setAlarm(Date.now() + 1000);
 
-    return { ok: true };
+    return (pkChanged || tokenChanged)
+      ? { ok: true, ownerWallet: newOwner, tokenId: nextTokenId }
+      : { ok: true };
   }
 
   /**
