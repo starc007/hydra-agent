@@ -62,6 +62,30 @@ export function eventLabel(e: HydraEvent): EventLabel {
         txHash: hash || undefined,
       };
     }
+    case 'PRICE_PATTERN': {
+      const p = e.payload as { pattern: string; volatility: string; reasoning: string };
+      const tone: EventTone = p.volatility === 'high' ? 'warn' : p.volatility === 'medium' ? 'default' : 'accent';
+      return { headline: `Price ${p.pattern.replace(/_/g, ' ')}`, detail: `${p.volatility} volatility — ${p.reasoning.slice(0, 120)}`, tone };
+    }
+    case 'VOLATILITY_SPIKE': {
+      const p = e.payload as { stdDev: number; window: number; reasoning?: string };
+      return { headline: 'Volatility spike', detail: p.reasoning ?? `σ ${p.stdDev.toFixed(2)} over ${p.window} samples`, tone: 'warn' };
+    }
+    case 'RISK_ANALYSIS': {
+      const p = e.payload as { verdict: string; reasoning: string; hint?: string; ilPct: number; feesEarnedUsd: number };
+      const tone: EventTone = p.verdict === 'dangerous' ? 'err' : p.verdict === 'concerning' ? 'warn' : 'accent';
+      return { headline: `Risk: ${p.verdict}`, detail: `${p.reasoning.slice(0, 130)}${p.hint ? ` — hint: ${p.hint}` : ''}`, tone };
+    }
+    case 'COORDINATOR_REVIEW': {
+      const p = e.payload as { action: string; reasoning: string };
+      const tone: EventTone = p.action === 'block' ? 'err' : p.action === 'escalate' ? 'warn' : 'accent';
+      return { headline: `Coordinator: ${p.action}`, detail: p.reasoning.slice(0, 140), tone };
+    }
+    case 'MARKET_CONTEXT': {
+      const p = e.payload as { vibe: string; reasoning: string };
+      const tone: EventTone = p.vibe === 'bullish' ? 'accent' : p.vibe === 'bearish' ? 'warn' : 'default';
+      return { headline: `Market: ${p.vibe}`, detail: p.reasoning.slice(0, 140), tone };
+    }
     default:
       return { headline: e.type, detail: '', tone: 'default' };
   }
@@ -74,6 +98,7 @@ export const AGENT_LABEL: Record<string, string> = {
   coordinator: 'Coordinator',
   execution: 'Execution',
   bot: 'Bot',
+  macro: 'Macro',
 };
 
 export const AGENT_ROLE: Record<string, string> = {
@@ -83,4 +108,14 @@ export const AGENT_ROLE: Record<string, string> = {
   coordinator: 'Approves or escalates',
   execution: 'Submits on-chain txs',
   bot: 'Telegram escalation',
+  macro: 'Reads market context',
 };
+
+export const LLM_DRIVEN_EVENT_TYPES = new Set([
+  'STRATEGY_RECOMMENDATION',
+  'PRICE_PATTERN',
+  'VOLATILITY_SPIKE',
+  'RISK_ANALYSIS',
+  'COORDINATOR_REVIEW',
+  'MARKET_CONTEXT',
+]);

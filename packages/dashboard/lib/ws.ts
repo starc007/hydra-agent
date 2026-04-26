@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 
-export type AgentName = 'price' | 'risk' | 'strategy' | 'coordinator' | 'execution' | 'bot';
+export type AgentName = 'price' | 'risk' | 'strategy' | 'coordinator' | 'execution' | 'bot' | 'macro';
 export type HydraEvent = {
   id: string;
   ts: number;
@@ -133,4 +133,5 @@ export const AGENT_COLORS: Record<AgentName, string> = {
   coordinator: 'bg-agent-coordinator',
   execution: 'bg-agent-execution',
   bot: 'bg-agent-bot',
+  macro: 'bg-agent-macro',
 };

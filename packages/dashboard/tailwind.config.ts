@@ -5,7 +5,7 @@ const config: Config = {
   darkMode: 'class',
   safelist: [
     'bg-agent-price','bg-agent-risk','bg-agent-strategy',
-    'bg-agent-coordinator','bg-agent-execution','bg-agent-bot',
+    'bg-agent-coordinator','bg-agent-execution','bg-agent-bot','bg-agent-macro',
   ],
   theme: {
     extend: {
@@ -36,6 +36,7 @@ const config: Config = {
           coordinator: '#3FCF8E',
           execution: '#5BC8FA',
           bot: '#FF7AB6',
+          macro: '#FFB86C',
         },
       },
       fontFamily: {
