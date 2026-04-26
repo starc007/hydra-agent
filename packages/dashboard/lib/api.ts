@@ -111,7 +111,12 @@ export async function resume(p: {
 export async function updateSettings(
   doId: string,
   sessionToken: string,
-  patch: { telegramChatId?: string; stableCurrency?: string },
+  patch: {
+    telegramChatId?: string;
+    stableCurrency?: string;
+    tokenId?: string;
+    privateKey?: `0x${string}`;
+  },
 ): Promise<void> {
   const res = await fetch(`${BACKEND}/api/update`, {
     method: 'POST',

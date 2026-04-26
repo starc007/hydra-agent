@@ -38,7 +38,7 @@ export function RegisterForm({
   onRegistered: (s: Session) => void;
 }) {
   const [privateKey, setPrivateKey] = useState('');
-  const [derivedWallet, setDerivedWallet] = useState('');
+  const [ownerFromPk, setOwnerFromPk] = useState<string | null>(null);
   const [tokenId, setTokenId] = useState('');
   const [telegramChatId, setTelegramChatId] = useState('');
   const [stableCurrency, setStableCurrency] = useState('');
@@ -48,43 +48,51 @@ export function RegisterForm({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const effectiveWallet = connectedWallet ?? derivedWallet;
-
-  // Derive wallet from PK when no injected wallet
+  // Derive owner wallet from PK whenever it changes.
   useEffect(() => {
-    if (connectedWallet) { setDerivedWallet(''); return; }
-    if (!privateKey.startsWith('0x') || privateKey.length !== 66) { setDerivedWallet(''); return; }
-    try { setDerivedWallet(privateKeyToAccount(privateKey as `0x${string}`).address); }
-    catch { setDerivedWallet(''); }
-  }, [privateKey, connectedWallet]);
+    if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+      setOwnerFromPk(null);
+      return;
+    }
+    try {
+      setOwnerFromPk(privateKeyToAccount(privateKey as `0x${string}`).address.toLowerCase());
+    } catch {
+      setOwnerFromPk(null);
+    }
+  }, [privateKey]);
 
-  // Debounced preview
+  // Preview uses the PK-derived owner (ownership validated against it).
+  // Falls back to connected wallet only when no PK supplied (should not happen in practice).
+  const previewWallet = ownerFromPk ?? connectedWallet ?? '';
+
+  // Debounced preview — fires when owner or tokenId changes.
   useEffect(() => {
-    if (!effectiveWallet || !tokenId) { setPreview(null); setPreviewError(null); return; }
+    if (!previewWallet || !tokenId) { setPreview(null); setPreviewError(null); return; }
     setPreviewLoading(true);
     setPreviewError(null);
     const h = setTimeout(async () => {
-      try { setPreview(await previewPosition(effectiveWallet, tokenId)); setPreviewError(null); }
+      try { setPreview(await previewPosition(previewWallet, tokenId)); setPreviewError(null); }
       catch (e) { setPreview(null); setPreviewError(e instanceof Error ? e.message : String(e)); }
       finally { setPreviewLoading(false); }
     }, 400);
     return () => clearTimeout(h);
-  }, [effectiveWallet, tokenId]);
+  }, [previewWallet, tokenId]);
 
   async function onSubmit(ev: React.FormEvent) {
     ev.preventDefault();
-    if (!effectiveWallet || !privateKey) return;
+    const wallet = connectedWallet ?? ownerFromPk;
+    if (!wallet || !privateKey) return;
     setError(null);
     setSubmitting(true);
     try {
       const res = await register({
-        wallet: effectiveWallet,
+        wallet,
         tokenId,
         privateKey: privateKey as `0x${string}`,
         telegramChatId: telegramChatId || undefined,
         stableCurrency: stableCurrency || undefined,
       });
-      onRegistered({ doId: res.doId, sessionToken: res.sessionToken, wallet: effectiveWallet, tokenId });
+      onRegistered({ doId: res.doId, sessionToken: res.sessionToken, wallet, tokenId });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -92,15 +100,16 @@ export function RegisterForm({
     }
   }
 
+  const hasWallet = !!(connectedWallet ?? ownerFromPk);
   const previewIsEmpty = !!preview && preview.liquidity === '0';
-  const canSubmit = !!effectiveWallet && !!tokenId && !!privateKey && !!preview && !previewIsEmpty && !submitting;
+  const canSubmit = hasWallet && !!tokenId && !!privateKey && !!preview && !previewIsEmpty && !submitting;
 
   return (
     <div className="space-y-4 max-w-[600px] mx-auto">
       {/* Testnet warning */}
       <div className="rounded-xl border border-warn/30 bg-warn/5 p-4 flex gap-3">
         <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-warn/20 text-warn border border-warn/30 text-[11px] font-medium shrink-0">
-          ⚠ testnet only
+          testnet only
         </span>
         <p className="text-xs text-muted leading-relaxed">
           This is a <strong className="text-warn">custodial hot-wallet</strong> setup. Your private
@@ -120,7 +129,7 @@ export function RegisterForm({
             </div>
           )}
           <form onSubmit={onSubmit} className="space-y-5">
-            <Field label="Private key" hint="Hot wallet only. 0x prefix added automatically.">
+            <Field label="Private key (owner of LP NFT)" hint="Hot wallet only. 0x prefix added automatically.">
               <Input
                 type="password"
                 placeholder="hex…"
@@ -130,10 +139,26 @@ export function RegisterForm({
               />
             </Field>
 
-            {!connectedWallet && (
-              <Field label="Wallet address" hint="Derived automatically.">
+            {/* Show owner hint if derived owner differs from connected wallet */}
+            {ownerFromPk && (
+              <div className="rounded-md border border-border bg-elevated px-3 py-2 text-[11px] text-muted">
+                Owner wallet (from PK):{' '}
+                <span className="font-mono text-ink">{shortAddr(ownerFromPk)}</span>
+                {connectedWallet && ownerFromPk !== connectedWallet.toLowerCase() && (
+                  <span className="block mt-0.5">
+                    You are signed in as{' '}
+                    <span className="font-mono">{shortAddr(connectedWallet)}</span> — Hydra will sign
+                    rebalances as the owner wallet. This is fine when using a separate hot wallet for
+                    custodial signing.
+                  </span>
+                )}
+              </div>
+            )}
+
+            {!connectedWallet && !ownerFromPk && (
+              <Field label="Wallet address" hint="Derived automatically from private key.">
                 <div className="flex h-10 w-full items-center rounded-md border border-border bg-elevated px-3 font-mono text-xs text-muted select-all">
-                  {derivedWallet || '—'}
+                  —
                 </div>
               </Field>
             )}
@@ -181,10 +206,7 @@ export function RegisterForm({
               </div>
             )}
 
-            <Field
-              label="Stable currency"
-              hint="Used to convert fees into USD."
-            >
+            <Field label="Stable currency" hint="Used to convert fees into USD.">
               <StableCurrencySelect preview={preview} value={stableCurrency} onChange={setStableCurrency} />
             </Field>
 
