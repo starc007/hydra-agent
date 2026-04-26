@@ -42,6 +42,7 @@ export type PreviewPosition = {
   tickUpper: number;
   token0: { address: string; symbol: string; decimals: number };
   token1: { address: string; symbol: string; decimals: number };
+  liquidity: string;  // bigint as string
 };
 
 export async function previewPosition(wallet: string, tokenId: string): Promise<PreviewPosition> {

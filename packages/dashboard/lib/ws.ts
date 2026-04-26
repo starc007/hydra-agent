@@ -49,22 +49,47 @@ export function useEventStream(doId: string | null, max = 200): HydraEvent[] {
     if (!doId) return;
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    // Seed from persisted events first so the feed isn't blank on reload.
+    void (async () => {
+      try {
+        const res = await fetch(`${BACKEND}/api/events?do=${doId}`);
+        if (!res.ok) return;
+        const seed = (await res.json()) as HydraEvent[];
+        if (cancelled) return;
+        setEvents((prev) => mergeEvents(prev, seed, max));
+      } catch { /* ignore */ }
+    })();
 
     const connect = () => {
       ws = new WebSocket(wsUrl(doId));
       ws.onmessage = (m) => {
         try {
           const e: HydraEvent = JSON.parse(m.data as string);
-          setEvents((prev) => [e, ...prev].slice(0, max));
+          setEvents((prev) => mergeEvents([e], prev, max));
         } catch { /* ignore */ }
       };
       ws.onclose = () => { retry = setTimeout(connect, 2000); };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
     connect();
-    return () => { ws?.close(); if (retry) clearTimeout(retry); };
+    return () => { cancelled = true; ws?.close(); if (retry) clearTimeout(retry); };
   }, [doId, max]);
   return events;
+}
+
+/** Merge two event lists, dedupe by id, keep newest first, cap to max. */
+function mergeEvents(a: HydraEvent[], b: HydraEvent[], max: number): HydraEvent[] {
+  const seen = new Set<string>();
+  const out: HydraEvent[] = [];
+  for (const e of [...a, ...b]) {
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    out.push(e);
+  }
+  out.sort((x, y) => y.ts - x.ts);
+  return out.slice(0, max);
 }
 
 export function useSnapshot(doId: string | null): { data: Snapshot | null; loading: boolean; error: string | null } {

@@ -92,7 +92,8 @@ export function RegisterForm({
     }
   }
 
-  const canSubmit = !!effectiveWallet && !!tokenId && !!privateKey && !!preview && !submitting;
+  const previewIsEmpty = !!preview && preview.liquidity === '0';
+  const canSubmit = !!effectiveWallet && !!tokenId && !!privateKey && !!preview && !previewIsEmpty && !submitting;
 
   return (
     <div className="space-y-4 max-w-[600px] mx-auto">
@@ -171,6 +172,14 @@ export function RegisterForm({
               </div>
             )}
             {preview && !previewLoading && <PreviewCard preview={preview} />}
+            {previewIsEmpty && (
+              <div className="rounded-xl border border-warn/30 bg-warn/5 p-3">
+                <p className="text-xs text-warn">
+                  This position has zero liquidity — it was probably drained by a previous rebalance.
+                  Pick a different tokenId. (Your latest active position is the one Hydra last minted.)
+                </p>
+              </div>
+            )}
 
             <Field
               label="Stable currency"

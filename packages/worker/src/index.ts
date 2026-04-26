@@ -71,9 +71,15 @@ async function previewPosition(env: Env, wallet: string, tokenIdStr: string) {
   }
 
   const meta = await readPositionMetadata(publicClient as any, positionManager, tokenId);
-  const [token0, token1] = await Promise.all([
+  const [token0, token1, liquidity] = await Promise.all([
     readErc20Metadata(publicClient as any, meta.poolKey.currency0),
     readErc20Metadata(publicClient as any, meta.poolKey.currency1),
+    publicClient.readContract({
+      address: positionManager,
+      abi: [{ type: 'function', name: 'getPositionLiquidity', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'uint128' }] }],
+      functionName: 'getPositionLiquidity',
+      args: [tokenId],
+    }) as Promise<bigint>,
   ]);
 
   return {
@@ -85,6 +91,7 @@ async function previewPosition(env: Env, wallet: string, tokenIdStr: string) {
     tickUpper: meta.tickUpper,
     token0,
     token1,
+    liquidity: liquidity.toString(),
   };
 }
 
