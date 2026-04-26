@@ -1,3 +1,4 @@
+import { Settings } from 'lucide-react';
 import { Card, CardContent } from '../ui/card';
 import { Button } from '../ui/button';
 import { shortAddr } from '../../lib/format';
@@ -6,12 +7,18 @@ export function BrandCard({
   wallet,
   onSignOut,
   onDisconnect,
+  onSettings,
+  onUnregister,
 }: {
   wallet?: string;
-  /** Sign out of an active monitoring session — also unregisters server-side. */
+  /** Logout only — clears localStorage + disconnects wallet; keeps server registration. */
   onSignOut?: () => void;
   /** Disconnect the wallet without touching server state. Used pre-registration. */
   onDisconnect?: () => void;
+  /** Open the settings dialog. Only shown when a session is active. */
+  onSettings?: () => void;
+  /** Permanently delete server-side registration. Shown below sign-out in active session. */
+  onUnregister?: () => void;
 }) {
   return (
     <Card>
@@ -26,20 +33,43 @@ export function BrandCard({
           </div>
         </div>
         {wallet && (
-          <div className="flex items-center justify-between gap-2 pt-2 border-t border-border">
-            <div className="space-y-0.5">
-              <div className="label">Wallet</div>
-              <div className="font-mono text-xs">{shortAddr(wallet)}</div>
+          <div className="space-y-2 pt-2 border-t border-border">
+            <div className="flex items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <div className="label">Wallet</div>
+                <div className="font-mono text-xs">{shortAddr(wallet)}</div>
+              </div>
+              <div className="flex items-center gap-1">
+                {onSettings && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={onSettings}
+                    title="Settings"
+                    className="h-8 w-8"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                  </Button>
+                )}
+                {onSignOut ? (
+                  <Button variant="ghost" size="sm" onClick={onSignOut}>
+                    Sign out
+                  </Button>
+                ) : onDisconnect ? (
+                  <Button variant="ghost" size="sm" onClick={onDisconnect}>
+                    Disconnect
+                  </Button>
+                ) : null}
+              </div>
             </div>
-            {onSignOut ? (
-              <Button variant="ghost" size="sm" onClick={onSignOut}>
-                Sign out
-              </Button>
-            ) : onDisconnect ? (
-              <Button variant="ghost" size="sm" onClick={onDisconnect}>
-                Disconnect
-              </Button>
-            ) : null}
+            {onUnregister && (
+              <button
+                onClick={onUnregister}
+                className="w-full text-left text-[11px] text-subtle hover:text-err transition-colors pt-1"
+              >
+                Delete registration
+              </button>
+            )}
           </div>
         )}
       </CardContent>
