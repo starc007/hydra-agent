@@ -4,6 +4,18 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { Config } from '../config';
 import { STRATEGY_SYSTEM, buildUserMessage, RecommendSchema, type RecommendOutput } from './prompt';
+import {
+  PRICE_SYSTEM, PriceOutputSchema,
+  RISK_SYSTEM, RiskOutputSchema,
+  COORDINATOR_SYSTEM, CoordinatorOutputSchema,
+  MACRO_SYSTEM, MacroOutputSchema,
+} from './prompts';
+import type {
+  PriceAnalysisInput, PriceAnalysisOutput,
+  RiskAnalysisInput, RiskAnalysisOutput,
+  CoordinatorReviewInput, CoordinatorReviewOutput,
+  MacroAnalysisInput, MacroAnalysisOutput,
+} from './prompts';
 
 export type StrategyOutput = RecommendOutput;
 
@@ -17,31 +29,75 @@ export class LLMClient {
   constructor(private cfg: Config) {}
 
   async recommend(ctx: { events: unknown[]; position: unknown }): Promise<StrategyOutput> {
-    const provider = this.cfg.LLM_PROVIDER;
-    const modelId = this.cfg.LLM_MODEL ?? DEFAULTS[provider];
-    const model = this.pickModel(provider, modelId);
-
-    // For Anthropic, attach ephemeral cache control to the system message.
-    // For other providers, system is a plain string (providerOptions is ignored silently).
-    const systemMsg =
-      provider === 'anthropic'
-        ? {
-            role: 'system' as const,
-            content: STRATEGY_SYSTEM,
-            providerOptions: {
-              anthropic: { cacheControl: { type: 'ephemeral' as const } },
-            },
-          }
-        : STRATEGY_SYSTEM;
-
+    const { model, systemMsg } = this.buildCall(STRATEGY_SYSTEM);
     const { object } = await generateObject({
       model,
       schema: RecommendSchema,
       system: systemMsg,
       prompt: buildUserMessage(ctx),
     });
-
     return object;
+  }
+
+  async analyzePrice(input: PriceAnalysisInput): Promise<PriceAnalysisOutput> {
+    const { model, systemMsg } = this.buildCall(PRICE_SYSTEM);
+    const { object } = await generateObject({
+      model,
+      schema: PriceOutputSchema,
+      system: systemMsg,
+      prompt: `## Ticks\n${JSON.stringify(input.ticks)}`,
+    });
+    return object;
+  }
+
+  async analyzeRisk(input: RiskAnalysisInput): Promise<RiskAnalysisOutput> {
+    const { model, systemMsg } = this.buildCall(RISK_SYSTEM);
+    const { object } = await generateObject({
+      model,
+      schema: RiskOutputSchema,
+      system: systemMsg,
+      prompt: `ilPct=${input.ilPct.toFixed(4)} feesEarnedUsd=${input.feesEarnedUsd.toFixed(4)} timeInRange=${input.timeInRange.toFixed(2)}\n## Recent ticks\n${JSON.stringify(input.ticks)}`,
+    });
+    return object;
+  }
+
+  async reviewCoordinator(input: CoordinatorReviewInput): Promise<CoordinatorReviewOutput> {
+    const { model, systemMsg } = this.buildCall(COORDINATOR_SYSTEM);
+    const { object } = await generateObject({
+      model,
+      schema: CoordinatorOutputSchema,
+      system: systemMsg,
+      prompt: `## Recommendation\n${JSON.stringify(input.recommendation)}\n\n## Rules outcome\n${JSON.stringify(input.rules)}\n\n## Recent events\n${JSON.stringify(input.recentEvents.slice(-10))}`,
+    });
+    return object;
+  }
+
+  async analyzeMarket(input: MacroAnalysisInput): Promise<MacroAnalysisOutput> {
+    const { model, systemMsg } = this.buildCall(MACRO_SYSTEM);
+    const { object } = await generateObject({
+      model,
+      schema: MacroOutputSchema,
+      system: systemMsg,
+      prompt: `## Pool stats\n${JSON.stringify(input.poolStats)}`,
+    });
+    return object;
+  }
+
+  private buildCall(systemText: string) {
+    const provider = this.cfg.LLM_PROVIDER;
+    const modelId = this.cfg.LLM_MODEL ?? DEFAULTS[provider];
+    const model = this.pickModel(provider, modelId);
+    const systemMsg =
+      provider === 'anthropic'
+        ? {
+            role: 'system' as const,
+            content: systemText,
+            providerOptions: {
+              anthropic: { cacheControl: { type: 'ephemeral' as const } },
+            },
+          }
+        : systemText;
+    return { model, systemMsg };
   }
 
   private pickModel(provider: 'anthropic' | 'google' | 'openai', modelId: string) {
