@@ -18,6 +18,7 @@ import { RiskAgent } from './agents/risk';
 import { StrategyAgent } from './agents/strategy';
 import { Coordinator } from './agents/coordinator';
 import { ExecutionAgent } from './agents/execution';
+import { MacroAgent } from './agents/macro';
 import { makeSubmit } from './chain/submit';
 import { attachTelegramSender } from './bot/telegram';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -53,6 +54,7 @@ export class HydraDO extends DurableObject<Env> {
     strategy: StrategyAgent;
     coordinator: Coordinator;
     execution: ExecutionAgent;
+    macro: MacroAgent;
   } | null = null;
 
   constructor(state: DurableObjectState, env: Env) {
@@ -221,10 +223,14 @@ export class HydraDO extends DurableObject<Env> {
         return this.latestPool;
       },
       priceOf,
+      client: claude,
     });
 
     const risk = new RiskAgent(this.bus, {
       thresholdPct: this.cfg.IL_THRESHOLD_PCT,
+      client: claude,
+      getRecentTicks: () => price.getRecentTicks(10),
+      getTimeInRange: () => price.getTimeInRangePct(),
       sample: async () => {
         if (!this.positionMeta || !this.tokenMeta) {
           throw new Error('position metadata not loaded; cannot sample risk');
@@ -284,6 +290,42 @@ export class HydraDO extends DurableObject<Env> {
       cooldownSec: this.cfg.COOLDOWN_SEC,
       minConfidence: this.cfg.MIN_CONFIDENCE,
       requireSignals: ['OUT_OF_RANGE', 'IL_THRESHOLD_BREACH', 'FEE_HARVEST_READY'],
+      client: claude,
+    });
+
+    const macro = new MacroAgent(this.bus, {
+      client: claude,
+      getPoolStats: async () => {
+        if (!this.positionMeta || !this.tokenMeta) {
+          throw new Error('position metadata not loaded; cannot get pool stats for macro');
+        }
+        const pool = this.latestPool ?? (await fetchPoolState({
+          client: publicClient,
+          stateView: this.cfg.stateView,
+          poolId: this.positionMeta.poolId,
+          tickSpacing: this.positionMeta.poolKey.tickSpacing,
+          token0: this.tokenMeta.token0,
+          token1: this.tokenMeta.token1,
+        }));
+        const ticks = price.getRecentTicks();
+        const tickValues = ticks.map((t) => t.tick);
+        const minTick = tickValues.length ? Math.min(...tickValues) : pool.tick;
+        const maxTick = tickValues.length ? Math.max(...tickValues) : pool.tick;
+        let stdDev = 0;
+        if (tickValues.length > 1) {
+          const mean = tickValues.reduce((a, b) => a + b, 0) / tickValues.length;
+          stdDev = Math.sqrt(tickValues.reduce((s, t) => s + (t - mean) ** 2, 0) / tickValues.length);
+        }
+        const drift = tickValues.length > 1 ? tickValues[tickValues.length - 1] - tickValues[0] : 0;
+        return {
+          sqrtPriceX96: pool.sqrtPriceX96,
+          liquidity: pool.liquidity,
+          tick: pool.tick,
+          recentTickRange: { min: minTick, max: maxTick },
+          stdDev,
+          drift,
+        };
+      },
     });
 
     const submit = makeSubmit({
@@ -348,7 +390,7 @@ export class HydraDO extends DurableObject<Env> {
 
     this.bus.onAny((evt) => this.broadcast(evt));
 
-    this.agents = { price, risk, strategy, coordinator, execution };
+    this.agents = { price, risk, strategy, coordinator, execution, macro };
     await this.ctx.storage.setAlarm(Date.now() + this.cfg.TICK_INTERVAL_MS);
   }
 
@@ -365,7 +407,11 @@ export class HydraDO extends DurableObject<Env> {
     }
     if (!this.agents) return;
     try {
-      await Promise.all([this.agents.price.tick(), this.agents.risk.tick()]);
+      await Promise.all([
+        this.agents.price.tick(),
+        this.agents.risk.tick(),
+        this.agents.macro.tick(),
+      ]);
     } catch (err) {
       console.error('[do] tick failed', err);
     }
