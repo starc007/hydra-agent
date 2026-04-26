@@ -65,31 +65,32 @@ export class HydraDO extends DurableObject<Env> {
   // ────── registration ──────
 
   async register(args: {
-    signerWallet: `0x${string}`;  // connected wallet from dashboard (for indexing)
+    wallet: `0x${string}`;       // CONNECTED / SIGNER wallet — canonical identity
     tokenId: string;
     privateKey: `0x${string}`;
     telegramChatId?: string;
     stableCurrency?: string;
     sessionTokenHash: string;
-  }): Promise<{ doId: string; ownerWallet: `0x${string}`; range: Range }> {
-    // Derive the owner from the supplied private key — no enforcement against signerWallet.
-    const ownerWallet = privateKeyToAccount(args.privateKey).address.toLowerCase() as `0x${string}`;
-
-    // Validate ownership of the LP NFT by the PK-derived wallet.
+  }): Promise<{ doId: string; range: Range }> {
+    // Derive the owner from the supplied private key and validate it owns the NFT.
+    const owner = privateKeyToAccount(args.privateKey).address.toLowerCase() as `0x${string}`;
     const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
     const tokenId = BigInt(args.tokenId);
-    const ownerOf = (await publicClient.readContract({
+    const onChainOwner = (await publicClient.readContract({
       address: this.cfg.positionManager,
       abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
       functionName: 'ownerOf',
       args: [tokenId],
     })) as `0x${string}`;
-    if (ownerOf.toLowerCase() !== ownerWallet) {
-      throw new Error(`tokenId ${args.tokenId} is owned by ${ownerOf}, not ${ownerWallet} (derived from PK)`);
+    if (onChainOwner.toLowerCase() !== owner) {
+      throw new Error(`tokenId ${args.tokenId} is owned by ${onChainOwner}, not ${owner} (derived from PK)`);
     }
 
+    // doId is keyed by the SIGNER (connected) wallet — canonical identity.
+    this.doId = deriveDoId(args.wallet, tokenId);
+    this.activeTokenId = tokenId;
+
     // Best-effort metadata read — gives the dashboard the real range immediately.
-    // Tolerated; alarm() will retry the read when it boots.
     let initialRange: Range = { tickLower: -887200, tickUpper: 887200 };
     try {
       const meta = await readPositionMetadata(publicClient, this.cfg.positionManager, tokenId);
@@ -98,16 +99,15 @@ export class HydraDO extends DurableObject<Env> {
       console.warn('[do.register] positionMeta read failed; will retry in alarm', err);
     }
 
+    // Store user record. wallet here is the OWNER (PK-derived) — kept for re-validation on resume.
     const user: StoredUser = {
-      wallet: ownerWallet,
+      wallet: owner,
       tokenId: args.tokenId,
       privateKey: args.privateKey,
       telegramChatId: args.telegramChatId,
       stableCurrency: args.stableCurrency,
       sessionTokenHash: args.sessionTokenHash,
     };
-    this.doId = deriveDoId(ownerWallet, tokenId);
-    this.activeTokenId = tokenId;
     this.user = user;
     this.range = initialRange;
 
@@ -121,12 +121,11 @@ export class HydraDO extends DurableObject<Env> {
     await this.ctx.storage.delete('entryPrice');
 
     // Defer the heavy boot (RPC + agent wiring + alarm chain) to the alarm handler.
-    // We schedule it to fire ~1s from now; alarm() calls boot() on its first run.
     this.booted = false;
     this.agents = null;
     await this.ctx.storage.setAlarm(Date.now() + 1000);
 
-    return { doId: this.doId, ownerWallet, range: initialRange };
+    return { doId: this.doId, range: initialRange };
   }
 
   async unregister(): Promise<void> {
@@ -470,39 +469,35 @@ export class HydraDO extends DurableObject<Env> {
     await this.ctx.storage.put('range', range);
   }
 
-  /** Re-authenticate after localStorage was cleared. Validates the PK still derives the stored
-   *  wallet, validates the wallet still owns the position, and rotates the session token. */
+  /** Re-authenticate after localStorage was cleared. Validates the new PK derives a wallet
+   *  that currently owns the position on-chain, then rotates the session token and stored PK. */
   async resume(args: { privateKey: `0x${string}`; sessionTokenHash: string }): Promise<{ doId: string }> {
     this.user = (await this.ctx.storage.get<StoredUser>('user')) ?? this.user;
     if (!this.user) throw new Error('not_registered');
 
-    const derived = privateKeyToAccount(args.privateKey).address.toLowerCase();
-    if (derived !== this.user.wallet.toLowerCase()) {
-      throw new Error('private key does not match registered wallet');
-    }
-
-    // Re-validate ownership in case the NFT was transferred away.
+    const newOwner = privateKeyToAccount(args.privateKey).address.toLowerCase() as `0x${string}`;
     const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
-    const owner = (await publicClient.readContract({
+    const onChainOwner = (await publicClient.readContract({
       address: this.cfg.positionManager,
       abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
       functionName: 'ownerOf',
       args: [BigInt(this.user.tokenId)],
     })) as `0x${string}`;
-    if (owner.toLowerCase() !== this.user.wallet.toLowerCase()) {
-      throw new Error('wallet no longer owns the registered position');
+    if (onChainOwner.toLowerCase() !== newOwner) {
+      throw new Error('PK does not derive a wallet that owns this position');
     }
 
-    // Rotate session token + persist new PK.
-    this.user = { ...this.user, privateKey: args.privateKey, sessionTokenHash: args.sessionTokenHash };
+    // Update stored owner + PK + session token. doId is unchanged (keyed by signer wallet).
+    this.user = {
+      ...this.user,
+      wallet: newOwner,           // owner can change if user rotated keys
+      privateKey: args.privateKey,
+      sessionTokenHash: args.sessionTokenHash,
+    };
     await this.ctx.storage.put('user', this.user);
-
-    // Ensure agents are alive.
     await this.ctx.storage.setAlarm(Date.now() + 1000);
 
-    this.doId =
-      (await this.ctx.storage.get<string>('doId')) ??
-      deriveDoId(this.user.wallet, BigInt(this.user.tokenId));
+    this.doId = (await this.ctx.storage.get<string>('doId')) ?? this.doId;
     return { doId: this.doId };
   }
 

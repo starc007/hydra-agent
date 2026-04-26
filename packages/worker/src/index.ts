@@ -121,17 +121,17 @@ export default {
           { ...cors, 'cache-control': 'no-store' },
         );
       }
-      // Derive the owner wallet from the PK so we can address the correct DO before calling it.
       const { privateKeyToAccount } = await import('viem/accounts');
       const signerWallet = body.wallet.toLowerCase() as `0x${string}`;
-      const ownerWallet = privateKeyToAccount(body.privateKey as `0x${string}`).address.toLowerCase() as `0x${string}`;
+      const ownerWallet = privateKeyToAccount(body.privateKey as `0x${string}`).address.toLowerCase();
       const sessionToken = randomToken();
       const sessionTokenHash = await sha256Hex(sessionToken);
-      const doId = deriveDoId(ownerWallet, BigInt(body.tokenId));
+      // doId is keyed by the SIGNER (connected) wallet — canonical identity.
+      const doId = deriveDoId(signerWallet, BigInt(body.tokenId));
       try {
         const stub = doStub(env, doId);
         const result = await stub.register({
-          signerWallet,
+          wallet: signerWallet,
           tokenId: body.tokenId,
           privateKey: body.privateKey as `0x${string}`,
           telegramChatId: body.telegramChatId,
@@ -140,12 +140,12 @@ export default {
         });
         await upsertUser(env.DB, {
           doId: result.doId,
-          wallet: result.ownerWallet,
-          signerWallet,
+          wallet: ownerWallet,      // OWNER (PK-derived) — informational
+          signerWallet,             // CANONICAL identity for /api/lookup
           tokenId: body.tokenId,
         });
         return jsonResponse(
-          { doId: result.doId, sessionToken, range: result.range, ownerWallet: result.ownerWallet },
+          { doId: result.doId, sessionToken, range: result.range },
           cors,
         );
       } catch (err) {
@@ -213,15 +213,23 @@ export default {
       if (!body.wallet || !body.tokenId || !body.privateKey) {
         return jsonResponse({ error: 'wallet, tokenId, and privateKey are required' }, cors);
       }
-      // Owner wallet is derived from PK — address the DO at the owner-derived doId.
+      // doId is keyed by signer wallet — address the DO using the connected wallet.
       const { privateKeyToAccount: pkToAccount } = await import('viem/accounts');
-      const ownerWallet = pkToAccount(body.privateKey as `0x${string}`).address.toLowerCase() as `0x${string}`;
+      const signerWallet = body.wallet.toLowerCase() as `0x${string}`;
+      const ownerWallet = pkToAccount(body.privateKey as `0x${string}`).address.toLowerCase();
       const sessionToken = randomToken();
       const sessionTokenHash = await sha256Hex(sessionToken);
-      const doId = deriveDoId(ownerWallet, BigInt(body.tokenId));
+      const doId = deriveDoId(signerWallet, BigInt(body.tokenId));
       try {
         const stub = doStub(env, doId);
         const out = await stub.resume({ privateKey: body.privateKey as `0x${string}`, sessionTokenHash });
+        // Refresh the D1 row — owner may have changed if PK was rotated.
+        await upsertUser(env.DB, {
+          doId: out.doId,
+          wallet: ownerWallet,
+          signerWallet,
+          tokenId: body.tokenId,
+        });
         return jsonResponse({ doId: out.doId, sessionToken }, cors);
       } catch (err) {
         return jsonResponse(
@@ -252,10 +260,13 @@ export default {
           privateKey: body.privateKey as `0x${string}` | undefined,
         });
         // When owner or tokenId changed, refresh the D1 index row so /api/lookup stays correct.
+        // Signer wallet never changes on update — only wallet (owner) and tokenId can rotate.
         if (result.ownerWallet && result.tokenId) {
-          // Derive the current signer wallet from the lookup row (it doesn't change on update).
-          const existing = await findByWallet(env.DB, result.ownerWallet);
-          const signerWallet = existing[0]?.signerWallet ?? result.ownerWallet;
+          const existing = await env.DB
+            .prepare('SELECT signer_wallet FROM users WHERE do_id = ?')
+            .bind(body.doId)
+            .first<{ signer_wallet: string }>();
+          const signerWallet = (existing?.signer_wallet ?? result.ownerWallet) as `0x${string}`;
           await upsertUser(env.DB, {
             doId: body.doId,
             wallet: result.ownerWallet,
