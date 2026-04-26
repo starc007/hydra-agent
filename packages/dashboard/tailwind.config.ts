@@ -14,8 +14,8 @@ const config: Config = {
         surface: '#191919',
         surfaceAlt: '#1f1f1f',
         elevated: '#262626',
-        border: 'rgba(255,255,255,0.06)',
-        borderStrong: 'rgba(255,255,255,0.12)',
+        border: 'rgba(255,255,255,0.08)',
+        borderStrong: 'rgba(255,255,255,0.14)',
         ink: '#FFFFFF',
         muted: '#9b9b9b',
         subtle: '#6b6b6b',
@@ -46,8 +46,8 @@ const config: Config = {
         DEFAULT: '12px', md: '14px', lg: '20px', xl: '24px', '2xl': '28px',
       },
       boxShadow: {
-        card: '0 1px 0 0 rgba(255,255,255,0.04) inset, 0 8px 30px -12px rgba(0,0,0,0.6)',
-        glow: '0 0 32px -4px rgba(229,1,165,0.4)',
+        card: 'none',
+        glow: 'none',
       },
       backgroundImage: {
         'brand-gradient': 'linear-gradient(135deg, #E501A5 0%, #B8007F 100%)',

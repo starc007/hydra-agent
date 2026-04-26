@@ -37,7 +37,7 @@ export const SelectContent = React.forwardRef<
     <RadixSelect.Content
       ref={ref}
       className={cn(
-        'relative z-50 min-w-[8rem] overflow-hidden rounded-md border border-borderStrong bg-surface text-ink shadow-card',
+        'relative z-50 min-w-[8rem] overflow-hidden rounded-md border border-borderStrong bg-surface text-ink',
         'data-[state=open]:animate-in data-[state=closed]:animate-out',
         className,
       )}
