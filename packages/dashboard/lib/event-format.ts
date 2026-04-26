@@ -1,6 +1,22 @@
 import type { HydraEvent } from './ws';
 
-export function eventLabel(e: HydraEvent): { headline: string; detail: string; tone: 'default' | 'brand' | 'accent' | 'warn' | 'err' } {
+export type EventTone = 'default' | 'brand' | 'accent' | 'warn' | 'err';
+
+export type EventLabel = {
+  headline: string;
+  detail: string;
+  tone: EventTone;
+  /** When set, the row renders the detail as a clickable link to the chain explorer. */
+  txHash?: string;
+};
+
+export const EXPLORER_TX_BASE = 'https://sepolia.uniscan.xyz/tx';
+
+export function shortHash(h: string): string {
+  return `${h.slice(0, 10)}…${h.slice(-6)}`;
+}
+
+export function eventLabel(e: HydraEvent): EventLabel {
   switch (e.type) {
     case 'PRICE_UPDATE':
       return { headline: 'Price tick', detail: `tick ${e.payload.tick}`, tone: 'default' };
@@ -24,12 +40,28 @@ export function eventLabel(e: HydraEvent): { headline: string; detail: string; t
       return { headline: 'Escalated to human', detail: e.payload.reason as string, tone: 'warn' };
     case 'HUMAN_DECISION':
       return { headline: `Human ${e.payload.decision}`, detail: '', tone: 'brand' };
-    case 'TX_SUBMITTED':
-      return { headline: 'Tx sent', detail: `${(e.payload.hash as string).slice(0, 12)}…`, tone: 'default' };
-    case 'TX_CONFIRMED':
-      return { headline: 'Tx confirmed', detail: `block ${e.payload.blockNumber}`, tone: 'accent' };
-    case 'TX_FAILED':
-      return { headline: 'Tx failed', detail: (e.payload.error as string).slice(0, 140), tone: 'err' };
+    case 'TX_SUBMITTED': {
+      const hash = e.payload.hash as string;
+      return { headline: 'Tx sent', detail: shortHash(hash), tone: 'default', txHash: hash };
+    }
+    case 'TX_CONFIRMED': {
+      const hash = e.payload.hash as string;
+      return {
+        headline: 'Tx confirmed',
+        detail: `block ${e.payload.blockNumber} — ${shortHash(hash)}`,
+        tone: 'accent',
+        txHash: hash,
+      };
+    }
+    case 'TX_FAILED': {
+      const hash = (e.payload.hash as string | undefined) ?? '';
+      return {
+        headline: 'Tx failed',
+        detail: (e.payload.error as string).slice(0, 140),
+        tone: 'err',
+        txHash: hash || undefined,
+      };
+    }
     default:
       return { headline: e.type, detail: '', tone: 'default' };
   }

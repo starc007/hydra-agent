@@ -1,8 +1,9 @@
 'use client';
 import { motion } from 'motion/react';
+import { ExternalLink } from 'lucide-react';
 import { Badge } from '../ui/badge';
 import type { HydraEvent } from '../../lib/ws';
-import { eventLabel, AGENT_LABEL } from '../../lib/event-format';
+import { eventLabel, AGENT_LABEL, EXPLORER_TX_BASE } from '../../lib/event-format';
 import { relativeTime } from '../../lib/format';
 
 const SOURCE_DOT: Record<string, string> = {
@@ -15,7 +16,7 @@ const SOURCE_DOT: Record<string, string> = {
 };
 
 export function FeedRow({ e }: { e: HydraEvent }) {
-  const { headline, detail, tone } = eventLabel(e);
+  const { headline, detail, tone, txHash } = eventLabel(e);
 
   return (
     <motion.li
@@ -37,7 +38,21 @@ export function FeedRow({ e }: { e: HydraEvent }) {
           </div>
           <span className="text-[11px] text-subtle font-mono shrink-0">{relativeTime(e.ts)}</span>
         </div>
-        {detail && <div className="text-xs text-muted truncate font-mono">{detail}</div>}
+        {detail && (
+          txHash ? (
+            <a
+              href={`${EXPLORER_TX_BASE}/${txHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-muted hover:text-brand truncate font-mono underline-offset-2 hover:underline transition"
+            >
+              <span className="truncate">{detail}</span>
+              <ExternalLink className="w-3 h-3 shrink-0 opacity-60" />
+            </a>
+          ) : (
+            <div className="text-xs text-muted truncate font-mono">{detail}</div>
+          )
+        )}
       </div>
     </motion.li>
   );
