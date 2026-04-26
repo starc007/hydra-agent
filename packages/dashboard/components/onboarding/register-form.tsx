@@ -80,19 +80,18 @@ export function RegisterForm({
 
   async function onSubmit(ev: React.FormEvent) {
     ev.preventDefault();
-    const wallet = connectedWallet ?? ownerFromPk;
-    if (!wallet || !privateKey) return;
+    if (!connectedWallet || !privateKey) return;  // connected wallet is required
     setError(null);
     setSubmitting(true);
     try {
       const res = await register({
-        wallet,
+        wallet: connectedWallet,    // canonical signer identity, never the PK-derived owner
         tokenId,
         privateKey: privateKey as `0x${string}`,
         telegramChatId: telegramChatId || undefined,
         stableCurrency: stableCurrency || undefined,
       });
-      onRegistered({ doId: res.doId, sessionToken: res.sessionToken, wallet, tokenId });
+      onRegistered({ doId: res.doId, sessionToken: res.sessionToken, wallet: connectedWallet, tokenId });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,7 +99,7 @@ export function RegisterForm({
     }
   }
 
-  const hasWallet = !!(connectedWallet ?? ownerFromPk);
+  const hasWallet = !!connectedWallet;  // must be connected — PK-derived fallback removed
   const previewIsEmpty = !!preview && preview.liquidity === '0';
   const canSubmit = hasWallet && !!tokenId && !!privateKey && !!preview && !previewIsEmpty && !submitting;
 
