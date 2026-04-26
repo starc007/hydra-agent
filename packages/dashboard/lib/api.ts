@@ -92,3 +92,32 @@ export async function lookup(wallet: string): Promise<LookupRow[]> {
   if (!res.ok) return [];
   return (await res.json()) as LookupRow[];
 }
+
+export async function resume(p: {
+  wallet: string;
+  tokenId: string;
+  privateKey: `0x${string}`;
+}): Promise<{ doId: string; sessionToken: string }> {
+  const res = await fetch(`${BACKEND}/api/resume`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(p),
+  });
+  const j = await res.json();
+  if (!res.ok || j.error) throw new Error(j.error ?? `resume ${res.status}`);
+  return j as { doId: string; sessionToken: string };
+}
+
+export async function updateSettings(
+  doId: string,
+  sessionToken: string,
+  patch: { telegramChatId?: string; stableCurrency?: string },
+): Promise<void> {
+  const res = await fetch(`${BACKEND}/api/update`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-hydra-session': sessionToken },
+    body: JSON.stringify({ doId, ...patch }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || (j as { error?: string }).error) throw new Error((j as { error?: string }).error ?? `update ${res.status}`);
+}
