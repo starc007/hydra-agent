@@ -237,3 +237,17 @@ npm run deploy
 - **Cloudflare-native** — one Durable Object, one D1, one Pages deployment. No long-running boxes, no queues to babysit, free tier covers it.
 
 See `FEEDBACK.md` for our notes on the Uniswap API + v4 SDK developer experience.
+
+## Wallet connect
+
+The dashboard uses Reown AppKit (formerly WalletConnect). To enable the connect modal:
+
+1. Create a project at https://cloud.reown.com
+2. Copy the `Project ID`
+3. Set it as the build env var:
+   ```bash
+   NEXT_PUBLIC_REOWN_PROJECT_ID=your-project-id npm run build
+   ```
+   Or in Cloudflare Pages dashboard: Settings → Environment variables → `NEXT_PUBLIC_REOWN_PROJECT_ID`.
+
+Without a valid Project ID, the connect modal will open but WalletConnect QR scanning will fail. MetaMask and other injected wallets still work.
