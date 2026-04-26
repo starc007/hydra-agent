@@ -72,3 +72,19 @@ export async function listAllUsers(db: D1Database): Promise<UserRow[]> {
     lastKick: x.last_kick,
   }));
 }
+
+export async function findByWallet(db: D1Database, wallet: string): Promise<UserRow[]> {
+  const r = await db
+    .prepare(
+      `SELECT do_id, wallet, token_id, registered_at, last_kick FROM users WHERE wallet = ? ORDER BY registered_at DESC`,
+    )
+    .bind(wallet.toLowerCase())
+    .all<{ do_id: string; wallet: string; token_id: string; registered_at: number; last_kick: number }>();
+  return (r.results ?? []).map((x) => ({
+    doId: x.do_id,
+    wallet: x.wallet,
+    tokenId: x.token_id,
+    registeredAt: x.registered_at,
+    lastKick: x.last_kick,
+  }));
+}

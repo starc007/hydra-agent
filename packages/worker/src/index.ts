@@ -1,6 +1,6 @@
 import type { Env } from './config';
 import { listEvents, listDecisions } from './store/d1';
-import { upsertUser, deleteUser, listAllUsers, deriveDoId } from './store/users';
+import { upsertUser, deleteUser, listAllUsers, deriveDoId, findByWallet } from './store/users';
 import { parseCallback, answerCallback, resolveEscalationMessage } from './bot/telegram';
 export { HydraDO } from './do';
 
@@ -156,6 +156,17 @@ export default {
       // Return only non-PII fields
       return jsonResponse(
         list.map((u) => ({ doId: u.doId, wallet: u.wallet, tokenId: u.tokenId })),
+        cors,
+      );
+    }
+
+    // ── GET /api/lookup?wallet=<addr> ─────────────────────────────────────────
+    if (url.pathname === '/api/lookup') {
+      const wallet = url.searchParams.get('wallet');
+      if (!wallet) return jsonResponse({ error: 'wallet required' }, cors);
+      const list = await findByWallet(env.DB, wallet);
+      return jsonResponse(
+        list.map((u) => ({ doId: u.doId, wallet: u.wallet, tokenId: u.tokenId, registeredAt: u.registeredAt })),
         cors,
       );
     }
