@@ -19,6 +19,40 @@ import {
 } from './liquidity-amounts';
 import type { StrategyAction } from '../events';
 
+const KNOWN_REVERTS: Record<string, string> = {
+  // Permit2
+  '0xd81b2f2e': 'Permit2 allowance expired',
+  '0xfb8f41b2': 'Insufficient ERC20 balance',
+  '0x52cb24c9': 'Permit2 nonce already used',
+  // v4 PoolManager
+  '0xaefeb924': 'Cannot update an empty position',
+  '0x12bacdd3': 'Pool not initialized',
+  '0x91a4adcc': 'Curr in unlock callback context only',
+  // v4 PositionManager
+  '0xb3d0f4e6': 'Deadline passed',
+  '0x162908e3': 'Position deadline passed',
+  '0xfd0a4e9d': 'Slippage check failed (amount0 max exceeded)',
+  '0xe4c0aaf4': 'Slippage check failed (amount1 max exceeded)',
+  // ERC721
+  '0x59c896be': 'NFT not owned by caller',
+  '0xa9fbf51f': 'NFT operator not approved',
+};
+
+function decodeRevert(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  // viem includes "0x..." selectors in the message for unknown errors
+  const m = msg.match(/(0x[a-f0-9]{8})\b/i);
+  if (m) {
+    const sel = m[1].toLowerCase();
+    const known = KNOWN_REVERTS[sel];
+    if (known) return `${known} (${sel})`;
+    return `contract reverted with selector ${sel}`;
+  }
+  // Surface short message if no selector
+  const short = msg.split('\n')[0] ?? msg;
+  return short.length > 200 ? short.slice(0, 200) + '…' : short;
+}
+
 export type SubmitDeps = {
   publicClient: PublicClient;
   walletClient: WalletClient;
@@ -144,6 +178,10 @@ export function makeSubmit(deps: SubmitDeps) {
   async function wait(hash: `0x${string}`) {
     const r = await deps.publicClient.waitForTransactionReceipt({ hash });
 
+    if (r.status === 'reverted') {
+      throw new Error(`tx reverted on-chain: ${hash}`);
+    }
+
     // If this tx minted a fresh position NFT to our recipient, surface the new tokenId.
     // ERC721 Transfer(from, to, tokenId) — topic[0] is the canonical Transfer signature,
     // topic[1] = padded `from`, topic[2] = padded `to`, topic[3] = tokenId.
@@ -177,21 +215,30 @@ async function writeModify(deps: SubmitDeps, unlockData: `0x${string}`): Promise
   const args = [unlockData, deadline()] as const;
 
   // Pre-flight: catch reverts before broadcasting.
-  await deps.publicClient.simulateContract({
-    address: deps.positionManager,
-    abi: POSITION_MANAGER_ABI,
-    functionName: 'modifyLiquidities',
-    args,
-    account: account.address,
-  });
+  try {
+    await deps.publicClient.simulateContract({
+      address: deps.positionManager,
+      abi: POSITION_MANAGER_ABI,
+      functionName: 'modifyLiquidities',
+      args,
+      account: account.address,
+    });
+  } catch (err) {
+    throw new Error(`pre-flight failed: ${decodeRevert(err)}`);
+  }
 
-  const hash = await deps.walletClient.writeContract({
-    address: deps.positionManager,
-    abi: POSITION_MANAGER_ABI,
-    functionName: 'modifyLiquidities',
-    args,
-    account,
-    chain: null,
-  });
+  let hash: `0x${string}`;
+  try {
+    hash = await deps.walletClient.writeContract({
+      address: deps.positionManager,
+      abi: POSITION_MANAGER_ABI,
+      functionName: 'modifyLiquidities',
+      args,
+      account,
+      chain: null,
+    });
+  } catch (err) {
+    throw new Error(`tx submit failed: ${decodeRevert(err)}`);
+  }
   return { hash };
 }
