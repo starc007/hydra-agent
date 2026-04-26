@@ -81,14 +81,13 @@ export async function listAllUsers(db: D1Database): Promise<UserRow[]> {
 }
 
 export async function findByWallet(db: D1Database, wallet: string): Promise<UserRow[]> {
-  // Match either owner wallet OR signer wallet — supports the burner-wallet pattern.
   const w = wallet.toLowerCase();
   const r = await db
     .prepare(
       `SELECT do_id, wallet, signer_wallet, token_id, registered_at, last_kick
-       FROM users WHERE wallet = ? OR signer_wallet = ? ORDER BY registered_at DESC`,
+       FROM users WHERE signer_wallet = ? ORDER BY registered_at DESC`,
     )
-    .bind(w, w)
+    .bind(w)
     .all<{ do_id: string; wallet: string; signer_wallet: string; token_id: string; registered_at: number; last_kick: number }>();
   return (r.results ?? []).map((x) => ({
     doId: x.do_id,
