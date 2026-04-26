@@ -473,6 +473,68 @@ export class HydraDO extends DurableObject<Env> {
     await this.ctx.storage.put('range', range);
   }
 
+  /** Re-authenticate after localStorage was cleared. Validates the PK still derives the stored
+   *  wallet, validates the wallet still owns the position, and rotates the session token. */
+  async resume(args: { privateKey: `0x${string}`; sessionTokenHash: string }): Promise<{ doId: string }> {
+    this.user = (await this.ctx.storage.get<StoredUser>('user')) ?? this.user;
+    if (!this.user) throw new Error('not_registered');
+
+    const derived = privateKeyToAccount(args.privateKey).address.toLowerCase();
+    if (derived !== this.user.wallet.toLowerCase()) {
+      throw new Error('private key does not match registered wallet');
+    }
+
+    // Re-validate ownership in case the NFT was transferred away.
+    const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
+    const owner = (await publicClient.readContract({
+      address: this.cfg.positionManager,
+      abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
+      functionName: 'ownerOf',
+      args: [BigInt(this.user.tokenId)],
+    })) as `0x${string}`;
+    if (owner.toLowerCase() !== this.user.wallet.toLowerCase()) {
+      throw new Error('wallet no longer owns the registered position');
+    }
+
+    // Rotate session token + persist new PK.
+    this.user = { ...this.user, privateKey: args.privateKey, sessionTokenHash: args.sessionTokenHash };
+    await this.ctx.storage.put('user', this.user);
+
+    // Ensure agents are alive.
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+
+    this.doId =
+      (await this.ctx.storage.get<string>('doId')) ??
+      deriveDoId(this.user.wallet, BigInt(this.user.tokenId));
+    return { doId: this.doId };
+  }
+
+  /** Update mutable per-user settings without unregistering. Validates session before applying. */
+  async updateSettings(args: {
+    sessionTokenHash: string;
+    telegramChatId?: string | null;
+    stableCurrency?: string | null;
+  }): Promise<{ ok: true }> {
+    this.user = (await this.ctx.storage.get<StoredUser>('user')) ?? this.user;
+    if (!this.user) throw new Error('not_registered');
+    if (this.user.sessionTokenHash !== args.sessionTokenHash) throw new Error('forbidden');
+
+    const next: StoredUser = {
+      ...this.user,
+      telegramChatId: args.telegramChatId === null ? undefined : args.telegramChatId ?? this.user.telegramChatId,
+      stableCurrency: args.stableCurrency === null ? undefined : args.stableCurrency ?? this.user.stableCurrency,
+    };
+    this.user = next;
+    await this.ctx.storage.put('user', next);
+
+    // Force re-boot so Telegram listener and stable-currency wiring pick up new values on next alarm.
+    this.booted = false;
+    this.agents = null;
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+
+    return { ok: true };
+  }
+
   /**
    * Called from the Execution Agent when a REBALANCE tx mints a fresh LP NFT.
    * Repoints the worker at the new tokenId, refreshes positionMeta + range, and

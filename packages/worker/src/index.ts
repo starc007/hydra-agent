@@ -196,6 +196,53 @@ export default {
       }
     }
 
+    // ── POST /api/resume ──────────────────────────────────────────────────────
+    if (url.pathname === '/api/resume' && req.method === 'POST') {
+      const body = (await req.json()) as { wallet?: string; tokenId?: string; privateKey?: string };
+      if (!body.wallet || !body.tokenId || !body.privateKey) {
+        return jsonResponse({ error: 'wallet, tokenId, and privateKey are required' }, cors);
+      }
+      const wallet = body.wallet.toLowerCase() as `0x${string}`;
+      const sessionToken = randomToken();
+      const sessionTokenHash = await sha256Hex(sessionToken);
+      const doId = deriveDoId(wallet, BigInt(body.tokenId));
+      try {
+        const stub = doStub(env, doId);
+        const out = await stub.resume({ privateKey: body.privateKey as `0x${string}`, sessionTokenHash });
+        return jsonResponse({ doId: out.doId, sessionToken }, cors);
+      } catch (err) {
+        return jsonResponse(
+          { error: err instanceof Error ? err.message : String(err) },
+          { ...cors, 'cache-control': 'no-store' },
+        );
+      }
+    }
+
+    // ── POST /api/update ──────────────────────────────────────────────────────
+    if (url.pathname === '/api/update' && req.method === 'POST') {
+      const body = (await req.json()) as {
+        doId?: string;
+        telegramChatId?: string | null;
+        stableCurrency?: string | null;
+      };
+      const session = req.headers.get('x-hydra-session') ?? '';
+      if (!body.doId) return jsonResponse({ error: 'doId required' }, cors);
+      const sessionTokenHash = await sha256Hex(session);
+      try {
+        await doStub(env, body.doId).updateSettings({
+          sessionTokenHash,
+          telegramChatId: body.telegramChatId,
+          stableCurrency: body.stableCurrency,
+        });
+        return jsonResponse({ ok: true }, cors);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('forbidden')) return new Response('forbidden', { status: 403, headers: cors });
+        if (msg.includes('not_registered')) return new Response('not registered', { status: 404, headers: cors });
+        return jsonResponse({ error: msg }, cors);
+      }
+    }
+
     // Routes below require ?do=
     const doId = url.searchParams.get('do');
 
