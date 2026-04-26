@@ -1,4 +1,4 @@
-export type AgentName = 'price' | 'risk' | 'strategy' | 'coordinator' | 'execution' | 'bot';
+export type AgentName = 'price' | 'risk' | 'strategy' | 'coordinator' | 'execution' | 'bot' | 'macro';
 
 export type BaseEvent = { id: string; ts: number; source: AgentName };
 
@@ -8,11 +8,18 @@ export type PriceUpdate = BaseEvent & {
 };
 export type VolatilitySpike = BaseEvent & {
   type: 'VOLATILITY_SPIKE'; source: 'price';
-  payload: { stdDev: number; window: number };
+  payload: { stdDev: number; window: number; reasoning?: string };
 };
 export type OutOfRange = BaseEvent & {
   type: 'OUT_OF_RANGE'; source: 'price';
   payload: { tick: number; tickLower: number; tickUpper: number; side: 'below' | 'above' };
+};
+
+export type PriceVerdict = 'trending_up' | 'trending_down' | 'mean_reverting' | 'choppy' | 'spike' | 'stable';
+export type VolatilityLevel = 'low' | 'medium' | 'high';
+export type PricePattern = BaseEvent & {
+  type: 'PRICE_PATTERN'; source: 'price';
+  payload: { pattern: PriceVerdict; volatility: VolatilityLevel; reasoning: string };
 };
 
 export type ILThresholdBreach = BaseEvent & {
@@ -28,6 +35,13 @@ export type FeeHarvestReady = BaseEvent & {
   payload: { feesEarnedUsd: number };
 };
 
+export type RiskVerdict = 'healthy' | 'concerning' | 'dangerous';
+export type RiskHint = 'hold' | 'consider_exit' | 'consider_harvest';
+export type RiskAnalysis = BaseEvent & {
+  type: 'RISK_ANALYSIS'; source: 'risk';
+  payload: { verdict: RiskVerdict; reasoning: string; hint?: RiskHint; ilPct: number; feesEarnedUsd: number };
+};
+
 export type StrategyAction = 'HOLD' | 'REBALANCE' | 'HARVEST' | 'EXIT';
 export type StrategyRecommendation = BaseEvent & {
   type: 'STRATEGY_RECOMMENDATION'; source: 'strategy';
@@ -37,6 +51,12 @@ export type StrategyRecommendation = BaseEvent & {
     rationale: string;
     suggestedRange?: { tickLower: number; tickUpper: number };
   };
+};
+
+export type CoordinatorVerdict = 'approve' | 'escalate' | 'block';
+export type CoordinatorReview = BaseEvent & {
+  type: 'COORDINATOR_REVIEW'; source: 'coordinator';
+  payload: { action: CoordinatorVerdict; reasoning: string; correlatesTo: string };
 };
 
 export type Approved = BaseEvent & {
@@ -58,6 +78,12 @@ export type HumanDecision = BaseEvent & {
   payload: { decision: 'approve' | 'override'; correlatesTo: string };
 };
 
+export type MarketVibe = 'bullish' | 'bearish' | 'neutral' | 'uncertain';
+export type MarketContext = BaseEvent & {
+  type: 'MARKET_CONTEXT'; source: 'macro';
+  payload: { vibe: MarketVibe; reasoning: string };
+};
+
 export type TxSubmitted = BaseEvent & {
   type: 'TX_SUBMITTED'; source: 'execution';
   payload: { hash: `0x${string}`; action: StrategyAction };
@@ -72,11 +98,12 @@ export type TxFailed = BaseEvent & {
 };
 
 export type HydraEvent =
-  | PriceUpdate | VolatilitySpike | OutOfRange
-  | ILThresholdBreach | PositionHealthy | FeeHarvestReady
+  | PriceUpdate | VolatilitySpike | OutOfRange | PricePattern
+  | ILThresholdBreach | PositionHealthy | FeeHarvestReady | RiskAnalysis
   | StrategyRecommendation
-  | Approved | Escalate
+  | Approved | Escalate | CoordinatorReview
   | HumanDecision
+  | MarketContext
   | TxSubmitted | TxConfirmed | TxFailed;
 
 export type HydraEventType = HydraEvent['type'];
