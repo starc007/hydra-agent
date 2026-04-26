@@ -76,19 +76,30 @@ export class HydraDO extends DurableObject<Env> {
       throw new Error('private key does not match wallet address');
     }
 
-    // Validate that the wallet owns this position via PositionManager.ownerOf
+    // Validate ownership and read position metadata in one pass.
     const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: args.privateKey });
-    const ownerOf = await publicClient.readContract({
+    const tokenId = BigInt(args.tokenId);
+    const ownerOf = (await publicClient.readContract({
       address: this.cfg.positionManager,
       abi: [{ type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [{ type: 'address' }] }],
       functionName: 'ownerOf',
-      args: [BigInt(args.tokenId)],
-    }) as `0x${string}`;
+      args: [tokenId],
+    })) as `0x${string}`;
     if (ownerOf.toLowerCase() !== args.wallet.toLowerCase()) {
       throw new Error('wallet does not own this LP NFT');
     }
 
-    this.user = {
+    // Best-effort metadata read — gives the dashboard the real range immediately.
+    // Tolerated; alarm() will retry the read when it boots.
+    let initialRange: Range = { tickLower: -887200, tickUpper: 887200 };
+    try {
+      const meta = await readPositionMetadata(publicClient, this.cfg.positionManager, tokenId);
+      initialRange = { tickLower: meta.tickLower, tickUpper: meta.tickUpper };
+    } catch (err) {
+      console.warn('[do.register] positionMeta read failed; will retry in alarm', err);
+    }
+
+    const user: StoredUser = {
       wallet: args.wallet,
       tokenId: args.tokenId,
       privateKey: args.privateKey,
@@ -96,21 +107,27 @@ export class HydraDO extends DurableObject<Env> {
       stableCurrency: args.stableCurrency,
       sessionTokenHash: args.sessionTokenHash,
     };
-    await this.ctx.storage.put('user', this.user);
-    this.doId = deriveDoId(args.wallet, BigInt(args.tokenId));
-    await this.ctx.storage.put('doId', this.doId);
+    this.doId = deriveDoId(args.wallet, tokenId);
+    this.activeTokenId = tokenId;
+    this.user = user;
+    this.range = initialRange;
 
-    // Reset per-position state
-    this.activeTokenId = BigInt(args.tokenId);
-    await this.ctx.storage.put('activeTokenId', args.tokenId);
-    await this.ctx.storage.delete('range');
+    // Single batched write — atomic, single transaction, fast.
+    await this.ctx.storage.put({
+      user,
+      doId: this.doId,
+      activeTokenId: args.tokenId,
+      range: initialRange,
+    });
     await this.ctx.storage.delete('entryPrice');
 
-    // Force a fresh boot
+    // Defer the heavy boot (RPC + agent wiring + alarm chain) to the alarm handler.
+    // We schedule it to fire ~1s from now; alarm() calls boot() on its first run.
     this.booted = false;
     this.agents = null;
-    await this.boot();
-    return { doId: this.doId, range: this.range };
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+
+    return { doId: this.doId, range: initialRange };
   }
 
   async unregister(): Promise<void> {
