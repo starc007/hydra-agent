@@ -50,7 +50,12 @@ export default function HomePage() {
   if (!session) {
     return (
       <AppShell
-        left={<BrandCard wallet={wallet ?? undefined} />}
+        left={
+          <BrandCard
+            wallet={wallet ?? undefined}
+            onDisconnect={wallet ? () => { void disconnect(); } : undefined}
+          />
+        }
         center={
           <Onboarding
             wallet={wallet}

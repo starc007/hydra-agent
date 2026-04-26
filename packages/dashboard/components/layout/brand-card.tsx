@@ -1,4 +1,3 @@
-import { Badge } from '../ui/badge';
 import { Card, CardContent } from '../ui/card';
 import { Button } from '../ui/button';
 import { shortAddr } from '../../lib/format';
@@ -6,9 +5,13 @@ import { shortAddr } from '../../lib/format';
 export function BrandCard({
   wallet,
   onSignOut,
+  onDisconnect,
 }: {
   wallet?: string;
+  /** Sign out of an active monitoring session — also unregisters server-side. */
   onSignOut?: () => void;
+  /** Disconnect the wallet without touching server state. Used pre-registration. */
+  onDisconnect?: () => void;
 }) {
   return (
     <Card>
@@ -28,11 +31,15 @@ export function BrandCard({
               <div className="label">Wallet</div>
               <div className="font-mono text-xs">{shortAddr(wallet)}</div>
             </div>
-            {onSignOut && (
+            {onSignOut ? (
               <Button variant="ghost" size="sm" onClick={onSignOut}>
                 Sign out
               </Button>
-            )}
+            ) : onDisconnect ? (
+              <Button variant="ghost" size="sm" onClick={onDisconnect}>
+                Disconnect
+              </Button>
+            ) : null}
           </div>
         )}
       </CardContent>
