@@ -13,6 +13,7 @@ const SOURCE_DOT: Record<string, string> = {
   coordinator: 'bg-agent-coordinator',
   execution: 'bg-agent-execution',
   bot: 'bg-agent-bot',
+  macro: 'bg-agent-macro',
 };
 
 export function FeedRow({ e }: { e: HydraEvent }) {
