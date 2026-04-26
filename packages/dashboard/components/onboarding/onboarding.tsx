@@ -6,15 +6,15 @@ import { RegisterForm } from './register-form';
 
 export function Onboarding({
   wallet,
-  setWallet,
   onRegistered,
 }: {
   wallet: Address | null;
-  setWallet: (a: Address) => void;
   onRegistered: (s: Session) => void;
 }) {
+  // When wallet is null AppKit modal handles the connect flow.
+  // wagmi reactivity updates `wallet` once connected.
   if (!wallet) {
-    return <ConnectWallet onConnected={setWallet} />;
+    return <ConnectWallet />;
   }
   return <RegisterForm wallet={wallet} onRegistered={onRegistered} />;
 }

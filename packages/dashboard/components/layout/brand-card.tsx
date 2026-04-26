@@ -14,7 +14,7 @@ export function BrandCard({
     <Card>
       <CardContent className="pt-5 space-y-3">
         <div className="flex items-center gap-3">
-          <span className="w-9 h-9 rounded-xl bg-brand-gradient grid place-items-center font-bold text-white shadow-glow shrink-0">
+          <span className="w-9 h-9 rounded-xl bg-brand-gradient grid place-items-center font-bold text-white border border-borderStrong shrink-0">
             H
           </span>
           <div>

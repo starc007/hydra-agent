@@ -11,32 +11,21 @@ import { ActionsPanel } from '../components/position/actions-panel';
 import { Onboarding } from '../components/onboarding/onboarding';
 import { useEventStream, useSnapshot } from '../lib/ws';
 import { loadSession, saveSession, clearSession, type Session } from '../lib/storage';
-import { readSilentAccount } from '../lib/wallet';
-import { lookup, unregister } from '../lib/api';
+import { useWallet } from '../lib/wallet';
+import { unregister } from '../lib/api';
 
 export default function HomePage() {
   const [hydrated, setHydrated] = useState(false);
-  const [wallet, setWallet] = useState<Address | null>(null);
   const [session, setSession] = useState<Session | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      const stored = loadSession();
-      if (stored) setSession(stored);
+  // Wallet state is owned by wagmi — no local useState for address.
+  const { address, isConnected, disconnect } = useWallet();
+  const wallet: Address | null = isConnected && address ? address : null;
 
-      const silent = await readSilentAccount();
-      if (silent) {
-        setWallet(silent);
-        if (!stored) {
-          // Wallet known but no local session — check if there's a registered position.
-          // We can't restore the session token (only issued at register time),
-          // so we leave session=null to surface the register form.
-          const rows = await lookup(silent);
-          void rows; // available for future "re-link" UX
-        }
-      }
-      setHydrated(true);
-    })();
+  useEffect(() => {
+    const stored = loadSession();
+    if (stored) setSession(stored);
+    setHydrated(true);
   }, []);
 
   const events = useEventStream(session?.doId ?? null, 200);
@@ -55,6 +44,7 @@ export default function HomePage() {
     try { await unregister(session.doId, session.sessionToken); } catch { /* tolerate */ }
     clearSession();
     setSession(null);
+    await disconnect();
   }
 
   if (!session) {
@@ -64,7 +54,6 @@ export default function HomePage() {
         center={
           <Onboarding
             wallet={wallet}
-            setWallet={setWallet}
             onRegistered={(s) => { saveSession(s); setSession(s); }}
           />
         }
