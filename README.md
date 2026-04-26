@@ -1,102 +1,176 @@
 # Hydra
 
-**Multi-agent liquidity coordination on Uniswap v4 — entirely on Cloudflare.**
+**Autonomous Uniswap v4 LP management — a multi-agent system on Cloudflare.**
 
-Five specialized AI agents collaboratively manage a Uniswap v4 LP position on Unichain Sepolia. They communicate over an in-process event bus inside a single Durable Object, reach consensus, then execute on-chain via viem. When the agents disagree or threshold rules trip, a human gets pinged on Telegram.
+Live: **https://hydra-dashboard-81h.pages.dev** · Worker: **https://hydra.saurabh10102.workers.dev**
+
+Six specialized agents collaboratively monitor and manage a Uniswap v4 LP position on Unichain Sepolia. Five of them reason via LLM (Anthropic / Google / OpenAI, configurable); one stays deterministic for tx execution. They communicate over an in-process event bus inside a single Durable Object **per registered position**, archive every event to D1, and stream live state to a Twitter-style dashboard via WebSocket. When a recommendation requires human judgment, a Telegram bot escalates with inline ✅/❌ buttons.
 
 ---
 
 ## Architecture
 
 ```
-                   Cloudflare Worker
-                        │
-            ┌───────────┴────────────┐
-            ▼                        ▼
-    fetch / scheduled         Telegram /telegram webhook
-            │                        │
-            └────────────┬───────────┘
-                         ▼
-                ┌─────────────────────┐
-                │     HydraDO         │   (one Durable Object instance)
-                │                     │
-                │   ┌─────────────┐   │
-                │   │  EventBus   │   │
-                │   └──────┬──────┘   │
-                │          │          │
-                │  Price ─┤├─ Risk    │
-                │           ├ Strategy (LLM)
-                │           ├ Coordinator
-                │           └ Execution
-                └────┬────────────┬───┘
-                     │            │
-                     ▼            ▼
-                  D1 (sql)   WS to dashboard
-                                   │
-                                   ▼
-                          Cloudflare Pages
-                          (Next.js static)
+                Cloudflare Worker
+                       │
+            ┌──────────┴──────────┐
+            ▼                     ▼
+      fetch / scheduled     /telegram webhook
+            │                     │
+            │ (per-user routing by ?do=<id>)
+            ▼
+   ┌──────────────────────┐
+   │ HydraDO              │   one DO per (signerWallet, tokenId)
+   │ ┌──────────────────┐ │
+   │ │   Event Bus      │ │
+   │ └────────┬─────────┘ │
+   │          │           │
+   │  Price   │   Macro   │   ← polling agents (driven by alarm)
+   │  Risk    │   Strategy│
+   │          │           │
+   │  Coordinator (LLM    │   ← reactive agents (driven by bus events)
+   │  second-opinion)     │
+   │          │           │
+   │  Execution           │   ← only deterministic agent;
+   │   (viem + v4 actions │     signs txs with the user's PK
+   │    encoding)         │
+   └────┬────────────┬────┘
+        │            │
+        ▼            ▼
+     D1 (sql)   WebSocket → Cloudflare Pages dashboard
 
-                Outbound:
-                ──────────────────────────────────────────
-                StateView ──── pool state every 10s (on-chain, no key)
-                viem ───────── tx submit on Unichain Sepolia
-                LLM ────────── Anthropic / Google / OpenAI (configurable)
-                Telegram ───── escalation messages
+                Outbound
+        ────────────────────────────────────────
+        StateView ───── pool state every 10s (on-chain, no key)
+        viem ────────── tx submit on Unichain Sepolia
+        LLM ─────────── Anthropic / Google / OpenAI (configurable)
+        Telegram ────── escalation messages
 ```
 
-## The five agents
+Multi-tenancy: every registered position gets its own Durable Object, addressed by `keccak256(signerWallet || tokenId)`. State, alarm chain, agents, and WebSocket fan-out are isolated per user. The cron trigger (`* * * * *`) iterates the `users` table and `kick()`s up to 50 stale DOs each minute as a backup wakeup.
 
-- **Price** — polls the Uniswap API every 10s. Emits `PRICE_UPDATE` and `OUT_OF_RANGE` when the tick crosses the position bounds.
-- **Risk** — computes IL from `(priceEntry, priceNow)` each tick. Emits `IL_THRESHOLD_BREACH` / `POSITION_HEALTHY` / `FEE_HARVEST_READY`.
-- **Strategy** — listens for trigger events (`OUT_OF_RANGE`, `IL_THRESHOLD_BREACH`, etc.), passes recent context to the configured LLM (Anthropic / Google / OpenAI) with prompt caching (Anthropic only) via `generateObject`, emits a structured `STRATEGY_RECOMMENDATION`.
-- **Coordinator** — applies deterministic rules (min confidence, supporting signal, daily tx cap, cooldown). Either emits `APPROVED` or `ESCALATE`.
-- **Execution** — the only agent with access to the wallet. On `APPROVED` it submits a tx via viem and emits `TX_SUBMITTED` → `TX_CONFIRMED` (or `TX_FAILED`).
+---
+
+## The six agents
+
+Five reason via LLM (with aggressive throttling — see "Cost discipline"); one is deliberately deterministic.
+
+| Agent | LLM | Role | Throttle | Emits |
+|---|---|---|---|---|
+| **Price** | ✓ | Polls `StateView.getSlot0` every 10s, maintains a 30-tick rolling buffer, classifies the pattern | std-dev change >20% OR every 2 min | `PRICE_UPDATE`, `OUT_OF_RANGE`, `PRICE_PATTERN`, `VOLATILITY_SPIKE` |
+| **Risk** | ✓ | Computes IL deterministically; LLM gives a verdict on health vs. fees | IL change ≥0.3pp OR every 5 min | `POSITION_HEALTHY`, `IL_THRESHOLD_BREACH`, `FEE_HARVEST_READY`, `RISK_ANALYSIS` |
+| **Strategy** | ✓ | Triggered by Price/Risk events; recommends `HOLD` / `REBALANCE` / `HARVEST` / `EXIT` | Event-driven only | `STRATEGY_RECOMMENDATION` |
+| **Coordinator** | ✓ | Rule-based gate (caps, cooldown, confidence). For marginal cases, LLM second-opinion can override | One LLM call per recommendation, only if marginal | `APPROVED`, `ESCALATE`, `COORDINATOR_REVIEW` |
+| **Execution** | — | Encodes v4 `modifyLiquidities` calldata, applies slippage bands, pre-flights via `simulateContract`, submits, waits for receipt, rolls `activeTokenId` forward on rebalance mints | n/a | `TX_SUBMITTED`, `TX_CONFIRMED`, `TX_FAILED` |
+| **Macro** | ✓ | Reads pool stats, characterizes broader market vibe | Every 5 min | `MARKET_CONTEXT` |
+
+**Steady-state cost** (Gemini Flash): ~1 LLM call/min baseline + event-driven bursts ≈ **<$0.10/day per user**.
+
+---
 
 ## Tech stack
 
 | Layer | Tech |
 |---|---|
-| Agent runtime | Cloudflare Workers + 1 Durable Object (`HydraDO`) |
+| Agent runtime | Cloudflare Worker + 1 Durable Object per user (`HydraDO`) |
 | Event bus | Tiny typed `EventEmitter` (no `node:events`) |
-| LLM | Anthropic / Google / OpenAI via Vercel AI SDK (default `claude-sonnet-4-6`; switch via `LLM_PROVIDER`) — prompt caching on Anthropic |
-| Chain interaction | `viem` + on-chain reads via Uniswap v4 `StateView` (no hosted API dependency) |
+| LLM | Vercel AI SDK with Anthropic / Google / OpenAI (default `gemini-3.1-pro-preview`, configurable via `LLM_PROVIDER`) |
+| Chain | viem + on-chain reads via Uniswap v4 `StateView`, `PositionManager`, raw `modifyLiquidities` action encoding |
 | Network | Unichain Sepolia (chainId 1301) |
-| Storage | D1 (SQLite) — events + decisions persistence |
+| Storage | D1 (SQLite) — per-DO scoped events + decisions; users registry; escalation correlation table |
 | Real-time | Durable Object WebSocket Hibernation API |
 | Periodic ticks | DO alarms self-rescheduling every 10s + Cron `* * * * *` kicker |
 | Escalation | Telegram Bot API (webhook mode) |
 | Dashboard | Next.js 15 static export → Cloudflare Pages |
+| Wallet | Reown AppKit + wagmi v2 (WalletConnect, MetaMask, Coinbase, Rainbow, …) |
+| UI | shadcn-style modular components, Tailwind, Inter, Uniswap docs palette (`#131313` / `#E501A5`) |
+| Animations | `motion/react` (formerly framer-motion) |
+
+---
+
+## Identity model
+
+Hydra separates **signer wallet** from **owner wallet**:
+
+- **Signer wallet** — the wallet you connect via Reown. Canonical identity for sign-in. Used as the lookup key in `/api/lookup` and as the doId derivation: `keccak256(signerWallet || tokenId)`.
+- **Owner wallet** — the wallet whose private key you paste during registration. Must own the LP NFT (validated via `PositionManager.ownerOf`). The agents sign rebalance txs as this wallet.
+
+The two can be the same (typical) or different (the **burner-wallet pattern**: connect your hardware-wallet-protected main wallet for identity, paste a separate hot wallet's PK whose only job is to own the testnet NFT). The same private key can be registered under multiple signer wallets — each gets its own isolated DO instance.
+
+> **Custodial, testnet only.** Private keys are stored in Cloudflare Durable Object storage so the agents can sign rebalances autonomously. **Use only on Unichain Sepolia testnet wallets.** Mainnet would require account abstraction (session keys, ERC-4337) — out of scope here.
+
+---
+
+## API surface
+
+```
+POST /api/register          { wallet, tokenId, privateKey, telegramChatId?, stableCurrency? }
+                            → { doId, sessionToken, range }
+POST /api/resume            { wallet, tokenId, privateKey }
+                            → { doId, sessionToken }
+POST /api/unregister        { doId } + x-hydra-session
+POST /api/update            { doId, telegramChatId?, stableCurrency?, tokenId?, privateKey? }
+                            + x-hydra-session
+GET  /api/lookup?wallet=<a> → [{ doId, wallet, tokenId, registeredAt }]
+GET  /api/preview-position?wallet=<a>&tokenId=<t>
+                            → { owner, poolKey, poolId, tickLower, tickUpper, token0, token1, liquidity }
+GET  /api/users             → [{ doId, wallet, tokenId }]
+GET  /api/snapshot?do=<id>  → DO state + recent events + decisions
+GET  /api/events?do=<id>    → archived events
+GET  /api/decisions?do=<id> → archived APPROVED + ESCALATE
+GET  /ws?do=<id>            → live event stream
+POST /admin/force?do=<id>   { action } + x-hydra-session
+POST /admin/range?do=<id>   { tickLower, tickUpper } + x-hydra-session
+POST /telegram              ← Telegram webhook
+GET  /health                → ok
+```
+
+`x-hydra-session` is the bearer-style session token returned at register/resume time. SHA-256 hash stored in DO storage.
+
+---
 
 ## Project layout
 
 ```
 hydra-agent/
 ├── packages/
-│   ├── worker/                 # Cloudflare Worker + HydraDO
+│   ├── worker/                    # Cloudflare Worker + HydraDO
 │   │   ├── src/
-│   │   │   ├── index.ts            # fetch + scheduled + telegram webhook
-│   │   │   ├── do.ts               # HydraDO — boots bus, agents, alarms, WS
-│   │   │   ├── bus.ts              # tiny typed event emitter
-│   │   │   ├── events.ts           # event type union (single source of truth)
-│   │   │   ├── ids.ts              # uuid + event factory
-│   │   │   ├── config.ts           # zod-validated env -> Config
-│   │   │   ├── agents/{base,price,risk,strategy,coordinator,execution}.ts
-│   │   │   ├── chain/{client,pool,position,il,plan,submit,actions,state-view,tick-math,liquidity-amounts,erc20}.ts
-│   │   │   ├── llm/{prompt,client}.ts
-│   │   │   ├── store/d1.ts
-│   │   │   └── bot/telegram.ts
-│   │   ├── migrations/0001_init.sql
-│   │   ├── scripts/set-webhook.ts
+│   │   │   ├── index.ts                # routing, session auth, /api/*, /admin/*, cron fanout, /telegram webhook
+│   │   │   ├── do.ts                   # HydraDO — per-user state, agents, alarms, WS broadcast
+│   │   │   ├── bus.ts                  # tiny typed event emitter
+│   │   │   ├── events.ts               # event type union (single source of truth)
+│   │   │   ├── ids.ts                  # uuid + event factory
+│   │   │   ├── config.ts               # zod-validated worker env
+│   │   │   ├── agents/                 # base, price, risk, strategy, coordinator, execution, macro
+│   │   │   ├── chain/                  # client, pool, position, il, plan, submit, actions,
+│   │   │   │                           # state-view, tick-math, liquidity-amounts, erc20
+│   │   │   ├── llm/                    # client (Vercel AI SDK), prompt (strategy), prompts (per-agent)
+│   │   │   ├── store/                  # d1 (events/decisions), users (registry + escalations)
+│   │   │   └── bot/telegram.ts         # send/edit/parseCallback + escalation->doId D1 mapping
+│   │   ├── migrations/                 # 0001 init, 0002 multi-tenant, 0003 signer_wallet
+│   │   ├── scripts/                    # set-webhook, list-positions, create-position
+│   │   ├── contracts/MockToken.sol     # ERC20 used to deploy demo TKA/TKB pair
+│   │   ├── foundry.toml
 │   │   └── wrangler.toml
-│   └── dashboard/              # Next.js static-export → Cloudflare Pages
-│       ├── app/{layout,page,globals.css}
-│       ├── components/{agent-status,live-feed,position-panel,decision-log}.tsx
-│       ├── lib/ws.ts               # WS hook + snapshot fetch
+│   └── dashboard/                 # Next.js 15 static-export → Cloudflare Pages
+│       ├── app/                        # page (orchestrator), layout, providers, globals.css
+│       ├── components/
+│       │   ├── ui/                     # button, card, input, select, badge, separator
+│       │   ├── layout/                 # app-shell (3-col), brand-card
+│       │   ├── agents/                 # agent-card, agent-list (LLM verdicts surfaced)
+│       │   ├── feed/                   # live-feed, feed-row (motion entry, tx-link icons), filter pill
+│       │   ├── position/               # position-panel, decision-log, actions-panel
+│       │   ├── onboarding/             # connect-wallet, register-form, welcome-back, preview-card
+│       │   └── settings/               # settings-dialog (edit telegram, stable, tokenId, PK)
+│       ├── lib/                        # api, ws, wallet (wagmi hooks), wagmi, appkit, format,
+│       │                               # event-format (friendly labels), storage, cn
 │       └── wrangler.toml
-├── FEEDBACK.md                 # Uniswap API + v4 SDK DX notes
+├── FEEDBACK.md                    # Uniswap API + v4 SDK DX notes (required for prize)
 └── README.md
 ```
+
+---
 
 ## Quickstart (local)
 
@@ -108,29 +182,32 @@ cd hydra-agent
 npm install
 ```
 
-### 2. Provision local secrets
+### 2. Worker secrets
 
 ```bash
 cp .dev.vars.example packages/worker/.dev.vars
 # fill in:
-#   ANTHROPIC_API_KEY=sk-ant-...
-#   PRIVATE_KEY=0x...                  # funded Unichain Sepolia wallet
-#   TELEGRAM_BOT_TOKEN=...              # optional (escalation)
-#   TELEGRAM_CHAT_ID=...                # optional
-#   UNISWAP_API_KEY=                    # optional
+#   ANTHROPIC_API_KEY    # if you'll use LLM_PROVIDER=anthropic
+#   GOOGLE_GENERATIVE_AI_API_KEY  # if google (default)
+#   OPENAI_API_KEY       # if openai
+#   TELEGRAM_BOT_TOKEN   # optional — escalation
+#   UNISWAP_API_KEY      # optional
 ```
 
-### 3. Set the pool + position target
+### 3. Worker chain config (`packages/worker/wrangler.toml`)
 
-In `packages/worker/wrangler.toml`:
-- `POOL_ID` and `POSITION_MANAGER` — the v4 pool you want to manage on Unichain Sepolia (chainId 1301).
-- `STATE_VIEW` — the v4 `StateView` lens contract address on Unichain Sepolia (used for fee reads).
-- `TOKEN_ID` — your LP NFT id from PositionManager.
-- `POSITION_TICK_LOWER` / `POSITION_TICK_UPPER` — your position's range. The DO seeds `range` from these on first boot; afterwards the stored value wins (settable at runtime via `POST /admin/range`).
-- `STABLE_CURRENCY` — address of the USD-stable token in the pool (used for fee USD conversion). Leave empty to fall back to "token1 is stable".
-- `SLIPPAGE_BPS` — basis points of slippage tolerance for rebalances (default `50` = 0.5%).
+These are deployment-wide (chain-level), not per-user:
 
-### 4. Create the D1 database
+| Var | Meaning |
+|---|---|
+| `LLM_PROVIDER` | `anthropic` / `google` / `openai` |
+| `RPC_URL` | Unichain Sepolia RPC |
+| `POSITION_MANAGER` | `0xf969aee60879c54baaed9f3ed26147db216fd664` |
+| `STATE_VIEW` | `0xc199f1072a74d4e905aba1a84d9a45e2546b6222` |
+| `SLIPPAGE_BPS` | basis points (default `50` = 0.5%) |
+| `IL_THRESHOLD_PCT`, `DAILY_TX_CAP`, `COOLDOWN_SEC`, `MIN_CONFIDENCE`, `TICK_INTERVAL_MS` | Coordinator + risk knobs |
+
+### 4. D1 database
 
 ```bash
 cd packages/worker
@@ -139,28 +216,45 @@ npx wrangler d1 create hydra
 npm run db:migrate:local
 ```
 
-### 4b. (optional) Helper scripts
+### 5. (Optional) Helper scripts — mint a demo position
 
-If you need to mint a new v4 LP position or list the ones you already own:
+If you don't already own a v4 LP NFT on Unichain Sepolia:
 
 ```bash
 cd packages/worker
 
-# enumerate your v4 LP NFTs (auto-uses wallet from .dev.vars)
+# enumerate your existing positions
 npm run position:list
 
-# mint a new position (Unichain Sepolia, ERC20-ERC20 pair)
+# deploy mock ERC20s + create a TKA/TKB pool + mint a position
+forge build
+forge create contracts/MockToken.sol:MockToken --rpc-url https://sepolia.unichain.org \
+  --private-key $(grep PRIVATE_KEY .dev.vars | cut -d= -f2) --broadcast \
+  --constructor-args "Hydra Token A" "TKA" 1000000000000000000000000000
+
+forge create contracts/MockToken.sol:MockToken --rpc-url https://sepolia.unichain.org \
+  --private-key $(grep PRIVATE_KEY .dev.vars | cut -d= -f2) --broadcast \
+  --constructor-args "Hydra Token B" "TKB" 1000000000000000000000000000
+
 npm run position:create -- \
-  --tokenA 0x... --tokenB 0x... \
+  --tokenA <TKA_ADDR> --tokenB <TKB_ADDR> \
   --fee 3000 --tickSpacing 60 \
   --tickLower -300 --tickUpper 300 \
   --amount0 1000000000000000000 --amount1 1000000 \
-  [--initialPriceX96 79228162514264337593543950336]   # only if pool not yet initialized
+  --initialPriceX96 79228162514264337593543950336
 ```
 
-`position:create` handles pool initialization (if needed), Permit2 setup (idempotent), and prints the new `tokenId` you should paste into `wrangler.toml`.
+`position:create` handles pool initialization (if needed), Permit2 setup, and prints the new `tokenId`.
 
-### 5. Run
+### 6. Dashboard env
+
+```bash
+# packages/dashboard/.env.local
+NEXT_PUBLIC_BACKEND=http://localhost:8787
+NEXT_PUBLIC_REOWN_PROJECT_ID=<your-projectId-from-cloud.reown.com>
+```
+
+### 7. Run
 
 ```bash
 # terminal 1 — the worker
@@ -169,10 +263,12 @@ npm run dev
 
 # terminal 2 — the dashboard
 cd packages/dashboard
-NEXT_PUBLIC_BACKEND=http://localhost:8787 npm run dev
+npm run dev
 ```
 
-Open `http://localhost:3000`. Within ~10s the live feed should start showing `PRICE_UPDATE` events.
+Open `http://localhost:3000`. Click **Connect wallet** → AppKit modal → register your position (paste PK + tokenId).
+
+---
 
 ## Deploy to Cloudflare
 
@@ -180,74 +276,68 @@ Open `http://localhost:3000`. Within ~10s the live feed should start showing `PR
 
 ```bash
 cd packages/worker
-# wallet (required)
-npx wrangler secret put PRIVATE_KEY
-
-# LLM key — push the one matching wrangler.toml's LLM_PROVIDER
-npx wrangler secret put ANTHROPIC_API_KEY            # if LLM_PROVIDER=anthropic
-npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY # if LLM_PROVIDER=google
-npx wrangler secret put OPENAI_API_KEY               # if LLM_PROVIDER=openai
-
-# optional
+# one-time secrets
+npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY   # or ANTHROPIC_API_KEY / OPENAI_API_KEY per LLM_PROVIDER
 npx wrangler secret put TELEGRAM_BOT_TOKEN
-npx wrangler secret put TELEGRAM_CHAT_ID
-npx wrangler secret put UNISWAP_API_KEY
+npx wrangler secret put UNISWAP_API_KEY                # optional
 
 npm run db:migrate:remote
 npm run deploy
-# note the *.workers.dev URL
 ```
 
-### Telegram webhook
+### Telegram webhook (one-time after deploy)
 
 ```bash
-WORKER_URL=https://hydra.<acct>.workers.dev TELEGRAM_BOT_TOKEN=<token> npm run telegram:setwebhook
+WORKER_URL=https://hydra.<account>.workers.dev TELEGRAM_BOT_TOKEN=<token> npm run telegram:setwebhook
 ```
 
 ### Dashboard
 
-Edit `packages/dashboard/wrangler.toml`'s `NEXT_PUBLIC_BACKEND` to point at the worker URL, then:
-
 ```bash
 cd packages/dashboard
-npm run deploy
+NEXT_PUBLIC_BACKEND=https://hydra.<account>.workers.dev \
+NEXT_PUBLIC_REOWN_PROJECT_ID=<projectId> \
+  npm run build
+npx wrangler pages deploy out --project-name=hydra-dashboard --branch=main
 ```
+
+For Cloudflare Pages dashboard env vars: Settings → Environment variables → set `NEXT_PUBLIC_BACKEND` and `NEXT_PUBLIC_REOWN_PROJECT_ID` for both Production and Preview.
+
+---
 
 ## Demo flow
 
-1. Open the dashboard. Watch `PRICE_UPDATE` events stream in.
-2. Force the position out of range:
+1. Open the dashboard, connect a wallet via the Reown modal
+2. Register a position — paste the private key for the wallet that owns your v4 LP NFT, plus the tokenId. Telegram chat ID is optional. The form previews ownership + liquidity before allowing submit
+3. Watch the live feed start streaming events within ~10 s
+4. Force a rebalance to exercise the full agentic chain:
    ```bash
    curl -X POST https://hydra.<acct>.workers.dev/admin/range \
-     -H 'content-type: application/json' \
+     -H "x-hydra-session: <token>" -H "content-type: application/json" \
      -d '{"tickLower": <T-30>, "tickUpper": <T+30>}'
    ```
-3. Within one alarm tick (≤10s):
-   - Price agent emits `OUT_OF_RANGE`
-   - Strategy agent calls the configured LLM → emits `STRATEGY_RECOMMENDATION` with `REBALANCE`
-   - Coordinator emits `APPROVED`
-   - Execution agent emits `TX_SUBMITTED` → `TX_CONFIRMED`
-4. Tx hash is visible at `https://sepolia.uniscan.xyz/tx/<hash>`.
+5. Observe the chain in the feed:
+   ```
+   PRICE_PATTERN          Price's LLM characterizes the move
+   OUT_OF_RANGE           deterministic threshold trip
+   RISK_ANALYSIS          Risk's LLM verdict
+   STRATEGY_RECOMMENDATION Strategy's LLM picks an action
+   COORDINATOR_REVIEW     Coordinator's LLM second-opinion (if marginal)
+   APPROVED  /  ESCALATE  → Telegram if escalated
+   TX_SUBMITTED → TX_CONFIRMED   real on-chain tx, hash clickable to Uniscan
+   MARKET_CONTEXT         next 5-min Macro tick
+   ```
+
+The "All / LLM only" filter pill in the feed header switches between the firehose and just the 6 LLM-driven event types.
+
+---
 
 ## Why this design
 
-- **Reliability** — five specialized agents with narrow scopes. Each can be reasoned about and replaced independently.
-- **Transparency** — every agent emit is persisted to D1 and fanned out over WebSocket. The dashboard is a thin renderer of the same event stream.
-- **Composability** — agents are constructed with dependency-injection-shaped deps (`fetcher`, `sample`, `submit`, `client`). Swap any of them without touching the others.
-- **Cloudflare-native** — one Durable Object, one D1, one Pages deployment. No long-running boxes, no queues to babysit, free tier covers it.
+- **Multi-agent with deterministic guardrails** — the LLM proposes, deterministic rules dispose. Strategy can recommend anything; Coordinator's hard rules (daily tx cap, cooldown, min confidence) enforce safety. The LLM second-opinion only fires for marginal cases, not as a primary gate. You don't want Gemini deciding whether the daily tx cap is a good idea.
+- **One DO per user** — isolated state, isolated alarm, isolated WebSocket. Cloudflare's free tier scales to thousands of users at zero ops cost.
+- **Signer ≠ Owner** — connect your hardware-protected main wallet for identity, paste a burner's PK for signing. Hydra never touches the main key.
+- **Observable end to end** — every agent decision is archived to D1 and broadcast over WebSocket. You can audit in real time which LLM said what and why.
+- **No hosted-API dependency** — pool state reads via on-chain `StateView`. No Uniswap API key, no rate limits, works on any chain with v4 deployed.
 
-See `FEEDBACK.md` for our notes on the Uniswap API + v4 SDK developer experience.
-
-## Wallet connect
-
-The dashboard uses Reown AppKit (formerly WalletConnect). To enable the connect modal:
-
-1. Create a project at https://cloud.reown.com
-2. Copy the `Project ID`
-3. Set it as the build env var:
-   ```bash
-   NEXT_PUBLIC_REOWN_PROJECT_ID=your-project-id npm run build
-   ```
-   Or in Cloudflare Pages dashboard: Settings → Environment variables → `NEXT_PUBLIC_REOWN_PROJECT_ID`.
-
-Without a valid Project ID, the connect modal will open but WalletConnect QR scanning will fail. MetaMask and other injected wallets still work.
+See `FEEDBACK.md` for the Uniswap API + v4 SDK DX notes that came out of building this.
