@@ -84,3 +84,10 @@ export async function setRange(
   });
   if (!res.ok) throw new Error(`setRange ${res.status}`);
 }
+
+export type LookupRow = { doId: string; wallet: string; tokenId: string; registeredAt: number };
+export async function lookup(wallet: string): Promise<LookupRow[]> {
+  const res = await fetch(`${BACKEND}/api/lookup?wallet=${encodeURIComponent(wallet)}`);
+  if (!res.ok) return [];
+  return (await res.json()) as LookupRow[];
+}
