@@ -19,17 +19,59 @@ import type {
 
 export type StrategyOutput = RecommendOutput;
 
+export type LearningContext = {
+  fewShotBlock?: string;
+  preferenceProfile?: PreferenceProfile;
+};
+
+export type PreferenceProfile = {
+  approvedCentroid: number[];
+  rejectedCentroid: number[];
+  approveCount: number;
+  rejectCount: number;
+};
+
 const DEFAULTS = {
   anthropic: 'claude-sonnet-4-6',
   google: 'gemini-3.1-pro-preview',
   openai: 'gpt-4o',
 } as const;
 
+function prefixFewShot(base: string, fewShot?: string): string {
+  if (!fewShot) return base;
+  return `${fewShot}\n\n${base}`;
+}
+
+function buildPreferenceNote(profile?: PreferenceProfile): string {
+  if (!profile || profile.approveCount + profile.rejectCount < 3) return '';
+  const dims = ['priceTrend', 'ilPct', 'confidence', 'volatility', 'timeInRange', 'tickDist'];
+  const descApprove = dims
+    .map((d, i) => `${d}=${profile.approvedCentroid[i]?.toFixed(2) ?? '?'}`)
+    .join(', ');
+  const descReject = dims
+    .map((d, i) => `${d}=${profile.rejectedCentroid[i]?.toFixed(2) ?? '?'}`)
+    .join(', ');
+  return `\n\n## User preference profile (${profile.approveCount + profile.rejectCount} past decisions)\nTends to approve when: ${descApprove}\nTends to reject when: ${descReject}`;
+}
+
 export class LLMClient {
+  private contextProvider?: () => Promise<LearningContext>;
+
   constructor(private cfg: Config) {}
 
+  setContextProvider(fn: () => Promise<LearningContext>): void {
+    this.contextProvider = fn;
+  }
+
+  private async getLearningCtx(): Promise<LearningContext> {
+    if (!this.contextProvider) return {};
+    try { return await this.contextProvider(); }
+    catch { return {}; }
+  }
+
   async recommend(ctx: { events: unknown[]; position: unknown }): Promise<StrategyOutput> {
-    const { model, systemMsg } = this.buildCall(STRATEGY_SYSTEM);
+    const learning = await this.getLearningCtx();
+    const { model, systemMsg } = this.buildCall(prefixFewShot(STRATEGY_SYSTEM, learning.fewShotBlock));
     const { object } = await generateObject({
       model,
       schema: RecommendSchema,
@@ -51,7 +93,8 @@ export class LLMClient {
   }
 
   async analyzeRisk(input: RiskAnalysisInput): Promise<RiskAnalysisOutput> {
-    const { model, systemMsg } = this.buildCall(RISK_SYSTEM);
+    const learning = await this.getLearningCtx();
+    const { model, systemMsg } = this.buildCall(prefixFewShot(RISK_SYSTEM, learning.fewShotBlock));
     const { object } = await generateObject({
       model,
       schema: RiskOutputSchema,
@@ -62,7 +105,11 @@ export class LLMClient {
   }
 
   async reviewCoordinator(input: CoordinatorReviewInput): Promise<CoordinatorReviewOutput> {
-    const { model, systemMsg } = this.buildCall(COORDINATOR_SYSTEM);
+    const learning = await this.getLearningCtx();
+    const prefNote = buildPreferenceNote(learning.preferenceProfile);
+    const { model, systemMsg } = this.buildCall(
+      prefixFewShot(COORDINATOR_SYSTEM + prefNote, learning.fewShotBlock),
+    );
     const { object } = await generateObject({
       model,
       schema: CoordinatorOutputSchema,

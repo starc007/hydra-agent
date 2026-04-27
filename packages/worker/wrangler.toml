@@ -17,6 +17,10 @@ database_name = "hydra"
 database_id = "874360ea-73e5-4ad6-9ba4-71a6a156e308"
 migrations_dir = "migrations"
 
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "hydra-experience"
+
 [triggers]
 crons = ["* * * * *"]
 

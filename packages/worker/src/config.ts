@@ -3,6 +3,7 @@ import { z } from 'zod';
 export type Env = {
   HYDRA: DurableObjectNamespace;
   DB: D1Database;
+  VECTORIZE?: VectorizeIndex;
 
   // LLM (host-provided, shared)
   ANTHROPIC_API_KEY?: string;

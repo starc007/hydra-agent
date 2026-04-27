@@ -3,7 +3,7 @@ import type { PublicClient } from 'viem';
 import type { Env, Config } from './config';
 import { loadConfig } from './config';
 import { Bus } from './bus';
-import { newEvent } from './ids';
+import { newEvent, newId } from './ids';
 import type { HydraEvent } from './events';
 import { attachArchiver, listEvents, listDecisions, writeDecision } from './store/d1';
 import { deriveDoId } from './store/users';
@@ -12,7 +12,7 @@ import { readErc20Metadata, type TokenMetadata } from './chain/erc20';
 import { makeClients } from './chain/client';
 import { readPositionMetadata } from './chain/position';
 import { readPositionFees } from './chain/state-view';
-import { LLMClient } from './llm/client';
+import { LLMClient, type PreferenceProfile } from './llm/client';
 import { PriceAgent } from './agents/price';
 import { RiskAgent } from './agents/risk';
 import { StrategyAgent } from './agents/strategy';
@@ -22,6 +22,12 @@ import { MacroAgent } from './agents/macro';
 import { makeSubmit } from './chain/submit';
 import { attachTelegramSender } from './bot/telegram';
 import { privateKeyToAccount } from 'viem/accounts';
+import { saveDecisionContext, saveOutcome, updateOutcome, savePreference, listPreferences, getDecisionContext } from './store/learning';
+import { upsertExperience } from './store/vectorize';
+import { buildRetrievalContext } from './llm/retrieval';
+import { buildFeatureContextFromPool, buildFeatureVector } from './llm/feature-vector';
+import { scoreDecision, type ScoringSnapshot } from './chain/scoring';
+import { calibrateThresholds, computePreferenceProfile, type CoordinatorThresholds } from './agents/calibrator';
 
 type Range = { tickLower: number; tickUpper: number };
 
@@ -56,6 +62,19 @@ export class HydraDO extends DurableObject<Env> {
     execution: ExecutionAgent;
     macro: MacroAgent;
   } | null = null;
+
+  // ── learning state ──
+  private preferenceProfile?: PreferenceProfile;
+  private adaptedThresholds?: CoordinatorThresholds;
+  private lastCalibrationTs = 0;
+  private pendingScoring: Record<string, {
+    ts: number;
+    score4hDue: number;
+    score24hDue: number;
+    scored4h: boolean;
+    scored24h: boolean;
+    snapshot: ScoringSnapshot;
+  }> = {};
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -195,6 +214,35 @@ export class HydraDO extends DurableObject<Env> {
 
     const claude = new LLMClient(this.cfg);
 
+    // Load adapted thresholds + preference profile from storage.
+    this.adaptedThresholds = await this.ctx.storage.get<CoordinatorThresholds>('adaptedThresholds');
+    this.lastCalibrationTs = (await this.ctx.storage.get<number>('lastCalibrationTs')) ?? 0;
+    this.pendingScoring = (await this.ctx.storage.get<typeof this.pendingScoring>('pendingScoring')) ?? {};
+    const storedProfile = await this.ctx.storage.get<PreferenceProfile>('preferenceProfile');
+    if (storedProfile) this.preferenceProfile = storedProfile;
+
+    // Wire retrieval context provider so LLM calls get few-shot examples + preference.
+    claude.setContextProvider(async () => {
+      const pool = this.latestPool;
+      if (!pool || !this.positionMeta) return {};
+      try {
+        const priceTicks = price.getRecentTicks().map((t) => t.tick);
+        const featureCtx = buildFeatureContextFromPool(
+          pool, priceTicks, 0, 0.75,
+          price.getTimeInRangePct(),
+          this.range.tickLower, this.range.tickUpper,
+        );
+        const retrieval = await buildRetrievalContext({
+          vectorize: this.env.VECTORIZE,
+          db: this.env.DB,
+          featureCtx,
+        });
+        return { fewShotBlock: retrieval.fewShotBlock || undefined, preferenceProfile: this.preferenceProfile };
+      } catch {
+        return { preferenceProfile: this.preferenceProfile };
+      }
+    });
+
     const priceOf = (s: PoolState) =>
       priceFromSqrtX96(s.sqrtPriceX96, s.token0.decimals, s.token1.decimals);
 
@@ -282,9 +330,9 @@ export class HydraDO extends DurableObject<Env> {
     });
 
     const coordinator = new Coordinator(this.bus, {
-      dailyTxCap: this.cfg.DAILY_TX_CAP,
-      cooldownSec: this.cfg.COOLDOWN_SEC,
-      minConfidence: this.cfg.MIN_CONFIDENCE,
+      dailyTxCap: this.adaptedThresholds?.dailyTxCap ?? this.cfg.DAILY_TX_CAP,
+      cooldownSec: this.adaptedThresholds?.cooldownSec ?? this.cfg.COOLDOWN_SEC,
+      minConfidence: this.adaptedThresholds?.minConfidence ?? this.cfg.MIN_CONFIDENCE,
       requireSignals: ['OUT_OF_RANGE', 'IL_THRESHOLD_BREACH', 'FEE_HARVEST_READY'],
       client: claude,
     });
@@ -372,6 +420,8 @@ export class HydraDO extends DurableObject<Env> {
           rationale: e.payload.reason,
         },
       });
+      // Queue scoring if we have enough state.
+      void this.queueScoring(e.id, e.ts, e.payload.action);
     });
     this.bus.on('ESCALATE', (e) => {
       void writeDecision(this.env.DB, this.doId, {
@@ -382,6 +432,11 @@ export class HydraDO extends DurableObject<Env> {
         approved: false,
         recommendation: e.payload.recommendation,
       });
+    });
+
+    // Preference learning: log Telegram approve/reject to build personal style profile.
+    this.bus.on('HUMAN_DECISION', (e) => {
+      void this.recordPreference(e.payload.decision === 'approve' ? 'approve' : 'reject', e.payload.correlatesTo);
     });
 
     this.bus.onAny((evt) => this.broadcast(evt));
@@ -410,6 +465,12 @@ export class HydraDO extends DurableObject<Env> {
       ]);
     } catch (err) {
       console.error('[do] tick failed', err);
+    }
+    // Process pending scoring jobs (4h / 24h windows).
+    await this.processPendingScoring();
+    // Daily calibration check.
+    if (Date.now() - this.lastCalibrationTs > 24 * 3600 * 1000) {
+      void this.runCalibration();
     }
     await this.ctx.storage.setAlarm(Date.now() + this.cfg.TICK_INTERVAL_MS);
   }
@@ -563,6 +624,189 @@ export class HydraDO extends DurableObject<Env> {
     return (pkChanged || tokenChanged)
       ? { ok: true, ownerWallet: newOwner, tokenId: nextTokenId }
       : { ok: true };
+  }
+
+  // ────── learning helpers ──────
+
+  private async queueScoring(decisionId: string, ts: number, action: string): Promise<void> {
+    if (!this.positionMeta || !this.tokenMeta || !this.latestPool) return;
+    const pool = this.latestPool;
+    const priceNow = priceFromSqrtX96(pool.sqrtPriceX96, pool.token0.decimals, pool.token1.decimals);
+    let feesNow = 0;
+    try {
+      const { fees0, fees1 } = await readPositionFees({
+        client: makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: this.user!.privateKey }).publicClient,
+        stateView: this.cfg.stateView,
+        poolId: this.positionMeta.poolId,
+        positionManager: this.cfg.positionManager,
+        tokenId: this.activeTokenId,
+        tickLower: this.positionMeta.tickLower,
+        tickUpper: this.positionMeta.tickUpper,
+      });
+      const f0 = Number(fees0) / 10 ** pool.token0.decimals;
+      const f1 = Number(fees1) / 10 ** pool.token1.decimals;
+      feesNow = f0 * priceNow + f1;
+    } catch { /* ignore */ }
+
+    const snapshot: ScoringSnapshot = {
+      priceEntry: this.entryPrice ?? priceNow,
+      feesEarnedUsdAtDecision: feesNow,
+      tickLower: this.positionMeta.tickLower,
+      tickUpper: this.positionMeta.tickUpper,
+      poolId: this.positionMeta.poolId,
+      tokenId: this.activeTokenId,
+      stableCurrency: this.user?.stableCurrency,
+      token0: this.tokenMeta.token0,
+      token1: this.tokenMeta.token1,
+      tickSpacing: this.positionMeta.poolKey.tickSpacing,
+      poolKey: this.positionMeta.poolKey,
+    };
+
+    // Build feature vector for the decision context.
+    const priceTicks = this.agents?.price.getRecentTicks().map((t) => t.tick) ?? [];
+    const featureCtx = buildFeatureContextFromPool(pool, priceTicks, 0, 0.75, this.agents?.price.getTimeInRangePct() ?? 0, snapshot.tickLower, snapshot.tickUpper);
+    const featureVector = buildFeatureVector(featureCtx);
+
+    await saveDecisionContext(this.env.DB, {
+      id: decisionId,
+      doId: this.doId,
+      ts,
+      action,
+      poolId: this.positionMeta.poolId,
+      featureVector,
+      contextSnapshot: {
+        price: priceNow,
+        range: { tickLower: snapshot.tickLower, tickUpper: snapshot.tickUpper },
+        feesEarnedUsd: feesNow,
+        tick: pool.tick,
+      },
+    });
+
+    await saveOutcome(this.env.DB, {
+      decisionId,
+      doId: this.doId,
+      ts,
+      vectorized: 0,
+    });
+
+    this.pendingScoring[decisionId] = {
+      ts,
+      score4hDue: ts + 4 * 3600 * 1000,
+      score24hDue: ts + 24 * 3600 * 1000,
+      scored4h: false,
+      scored24h: false,
+      snapshot,
+    };
+    await this.ctx.storage.put('pendingScoring', this.pendingScoring);
+  }
+
+  private async processPendingScoring(): Promise<void> {
+    const now = Date.now();
+    const toScore = Object.entries(this.pendingScoring).filter(
+      ([, job]) => (!job.scored4h && now >= job.score4hDue) || (!job.scored24h && now >= job.score24hDue),
+    );
+    if (!toScore.length) return;
+
+    const { publicClient } = makeClients({ rpcUrl: this.cfg.RPC_URL, privateKey: this.user!.privateKey });
+
+    for (const [decisionId, job] of toScore) {
+      try {
+        const result = await scoreDecision({
+          client: publicClient,
+          stateView: this.cfg.stateView,
+          positionManager: this.cfg.positionManager,
+          snapshot: job.snapshot,
+        });
+
+        const is4h = !job.scored4h && now >= job.score4hDue;
+        const is24h = !job.scored24h && now >= job.score24hDue;
+
+        const patch: Parameters<typeof updateOutcome>[2] = {};
+        if (is4h) {
+          patch.score4h = result.score;
+          patch.feeDeltaUsd = result.feeDeltaUsd;
+          patch.ilDeltaPct = result.ilDeltaPct;
+          patch.rangeAdherence4h = result.rangeAdherence;
+          job.scored4h = true;
+        }
+        if (is24h) {
+          patch.score24h = result.score;
+          patch.rangeAdherence24h = result.rangeAdherence;
+          patch.netPnlVsHold = result.netPnlVsHold;
+          job.scored24h = true;
+        }
+        await updateOutcome(this.env.DB, decisionId, patch);
+
+        // After 24h score: upsert to Vectorize for cross-user retrieval.
+        if (is24h && this.env.VECTORIZE) {
+          const ctx = await getDecisionContext(this.env.DB, decisionId);
+          if (ctx) {
+            try {
+              await upsertExperience(this.env.VECTORIZE, decisionId, ctx.featureVector, {
+                decision_id: decisionId,
+                do_id: this.doId,
+                action: ctx.action,
+                score_4h: result.score,
+                score_24h: result.score,
+              });
+              await updateOutcome(this.env.DB, decisionId, { vectorized: 1 });
+            } catch {
+              await updateOutcome(this.env.DB, decisionId, { vectorized: 0 });
+            }
+          }
+        }
+
+        // Remove from pending once both windows scored.
+        if (job.scored4h && job.scored24h) {
+          delete this.pendingScoring[decisionId];
+        }
+      } catch (err) {
+        console.error(`[do] scoring failed for ${decisionId}`, err);
+      }
+    }
+    await this.ctx.storage.put('pendingScoring', this.pendingScoring);
+  }
+
+  private async recordPreference(decision: 'approve' | 'reject', correlatesTo: string): Promise<void> {
+    if (!this.latestPool || !this.positionMeta) return;
+    const pool = this.latestPool;
+    const priceTicks = this.agents?.price.getRecentTicks().map((t) => t.tick) ?? [];
+    const featureCtx = buildFeatureContextFromPool(pool, priceTicks, 0, 0.75, this.agents?.price.getTimeInRangePct() ?? 0, this.range.tickLower, this.range.tickUpper);
+    const featureVector = buildFeatureVector(featureCtx);
+
+    await savePreference(this.env.DB, {
+      id: newId(),
+      doId: this.doId,
+      ts: Date.now(),
+      featureVector,
+      decision,
+      correlatesTo,
+    });
+
+    // Recompute preference profile and cache in DO storage.
+    const all = await listPreferences(this.env.DB, this.doId);
+    this.preferenceProfile = computePreferenceProfile(all);
+    await this.ctx.storage.put('preferenceProfile', this.preferenceProfile);
+  }
+
+  private async runCalibration(): Promise<void> {
+    const current: CoordinatorThresholds = {
+      minConfidence: this.adaptedThresholds?.minConfidence ?? this.cfg.MIN_CONFIDENCE,
+      cooldownSec: this.adaptedThresholds?.cooldownSec ?? this.cfg.COOLDOWN_SEC,
+      dailyTxCap: this.adaptedThresholds?.dailyTxCap ?? this.cfg.DAILY_TX_CAP,
+    };
+    try {
+      const best = await calibrateThresholds(this.env.DB, this.doId, current);
+      if (best) {
+        this.adaptedThresholds = best;
+        await this.ctx.storage.put('adaptedThresholds', best);
+        console.log('[do] calibrated thresholds', best);
+      }
+    } catch (err) {
+      console.error('[do] calibration failed', err);
+    }
+    this.lastCalibrationTs = Date.now();
+    await this.ctx.storage.put('lastCalibrationTs', this.lastCalibrationTs);
   }
 
   /**
