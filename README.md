@@ -6,6 +6,8 @@ Live: **https://hydra-dashboard-81h.pages.dev** · Worker: **https://hydra.saura
 
 Six specialized agents collaboratively monitor and manage a Uniswap v4 LP position on Unichain Sepolia. Five of them reason via LLM (Anthropic / Google / OpenAI, configurable); one stays deterministic for tx execution. They communicate over an in-process event bus inside a single Durable Object **per registered position**, archive every event to D1, and stream live state to a Twitter-style dashboard via WebSocket. When a recommendation requires human judgment, a Telegram bot escalates with inline ✅/❌ buttons.
 
+Agents improve continuously through a four-layer learning loop: past decisions are scored against real outcomes (4h + 24h), similar situations are retrieved from a cross-user Vectorize index to prime LLM prompts, individual Telegram approve/reject signals shape a per-user preference model, and thresholds (`MIN_CONFIDENCE`, `COOLDOWN_SEC`, `DAILY_TX_CAP`) are recalibrated daily via grid search against historical scores.
+
 ---
 
 ## Architecture
@@ -77,7 +79,8 @@ Five reason via LLM (with aggressive throttling — see "Cost discipline"); one 
 | LLM | Vercel AI SDK with Anthropic / Google / OpenAI (default `gemini-3.1-pro-preview`, configurable via `LLM_PROVIDER`) |
 | Chain | viem + on-chain reads via Uniswap v4 `StateView`, `PositionManager`, raw `modifyLiquidities` action encoding |
 | Network | Unichain Sepolia (chainId 1301) |
-| Storage | D1 (SQLite) — per-DO scoped events + decisions; users registry; escalation correlation table |
+| Storage | D1 (SQLite) — events/decisions; users registry; escalation correlation; learning tables (decision contexts, outcomes, preferences, calibration log) |
+| Vector store | Cloudflare Vectorize — 32-dim cosine index (`hydra-experience`), shared cross-user for few-shot retrieval |
 | Real-time | Durable Object WebSocket Hibernation API |
 | Periodic ticks | DO alarms self-rescheduling every 10s + Cron `* * * * *` kicker |
 | Escalation | Telegram Bot API (webhook mode) |
@@ -142,13 +145,17 @@ hydra-agent/
 │   │   │   ├── events.ts               # event type union (single source of truth)
 │   │   │   ├── ids.ts                  # uuid + event factory
 │   │   │   ├── config.ts               # zod-validated worker env
-│   │   │   ├── agents/                 # base, price, risk, strategy, coordinator, execution, macro
+│   │   │   ├── agents/                 # base, price, risk, strategy, coordinator, execution, macro,
+│   │   │   │                           # calibrator (threshold grid search)
 │   │   │   ├── chain/                  # client, pool, position, il, plan, submit, actions,
-│   │   │   │                           # state-view, tick-math, liquidity-amounts, erc20
-│   │   │   ├── llm/                    # client (Vercel AI SDK), prompt (strategy), prompts (per-agent)
-│   │   │   ├── store/                  # d1 (events/decisions), users (registry + escalations)
+│   │   │   │                           # state-view, tick-math, liquidity-amounts, erc20, scoring
+│   │   │   ├── llm/                    # client (Vercel AI SDK + context provider), prompt (strategy),
+│   │   │   │                           # prompts (per-agent), feature-vector, retrieval (Vectorize RAG)
+│   │   │   ├── store/                  # d1 (events/decisions), users (registry + escalations),
+│   │   │   │                           # learning (D1 CRUD for 4 learning tables), vectorize
 │   │   │   └── bot/telegram.ts         # send/edit/parseCallback + escalation->doId D1 mapping
-│   │   ├── migrations/                 # 0001 init, 0002 multi-tenant, 0003 signer_wallet
+│   │   ├── migrations/                 # 0001 init, 0002 multi-tenant, 0003 signer_wallet,
+│   │   │                               # 0004 learning (decision_contexts, outcomes, preferences, calibration_log)
 │   │   ├── scripts/                    # set-webhook, list-positions, create-position
 │   │   ├── contracts/MockToken.sol     # ERC20 used to deploy demo TKA/TKB pair
 │   │   ├── foundry.toml
@@ -207,13 +214,16 @@ These are deployment-wide (chain-level), not per-user:
 | `SLIPPAGE_BPS` | basis points (default `50` = 0.5%) |
 | `IL_THRESHOLD_PCT`, `DAILY_TX_CAP`, `COOLDOWN_SEC`, `MIN_CONFIDENCE`, `TICK_INTERVAL_MS` | Coordinator + risk knobs |
 
-### 4. D1 database
+### 4. D1 database + Vectorize index
 
 ```bash
 cd packages/worker
 npx wrangler d1 create hydra
 # copy the printed `database_id` into wrangler.toml's [[d1_databases]] block
 npm run db:migrate:local
+
+# Vectorize is remote-only — create the index once (skip for pure local dev)
+npx wrangler vectorize create hydra-experience --dimensions=32 --metric=cosine
 ```
 
 ### 5. (Optional) Helper scripts — mint a demo position
@@ -281,6 +291,9 @@ npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY   # or ANTHROPIC_API_KEY / 
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put UNISWAP_API_KEY                # optional
 
+# one-time: create Vectorize index (32-dim cosine for learning RAG)
+npx wrangler vectorize create hydra-experience --dimensions=32 --metric=cosine
+
 npm run db:migrate:remote
 npm run deploy
 ```
@@ -341,3 +354,47 @@ The "All / LLM only" filter pill in the feed header switches between the firehos
 - **No hosted-API dependency** — pool state reads via on-chain `StateView`. No Uniswap API key, no rate limits, works on any chain with v4 deployed.
 
 See `FEEDBACK.md` for the Uniswap API + v4 SDK DX notes that came out of building this.
+
+---
+
+## Learning loop
+
+Agents get better the longer they run. Four mechanisms cooperate:
+
+### 1. Outcome scoring
+Every `APPROVED` decision is queued for evaluation at two horizons — **4 h** and **24 h**. On each 10 s alarm tick the DO checks pending scoring jobs and, when a window is due, reads current on-chain state to compute a composite score:
+
+```
+score = 0.4 × feeDeltaNorm + 0.3 × ilDeltaNorm + 0.2 × rangeAdherence + 0.1 × pnlNorm
+```
+
+Mapped to `[-1, 1]` and written to the `outcomes` D1 table.
+
+### 2. Vectorize RAG (cross-user few-shot retrieval)
+At decision time a **32-dim feature vector** is built from the current pool state:
+
+```
+[priceTrend, ilPct, confidence, volatility, timeInRange, tickDistNorm, 0×26]
+```
+
+This is used to query `hydra-experience` (Cloudflare Vectorize, cosine, 32-dim) for the top-5 most similar past decisions that already have a positive 24 h score. Those decisions are formatted as few-shot examples and prepended to the system prompt for Strategy, Risk, and Coordinator LLM calls.
+
+After the 24 h score is written, the vector is upserted to Vectorize so future users benefit from the outcome.
+
+### 3. Preference model
+Each Telegram ✅/❌ button press is logged to the `preferences` D1 table. After every feedback event the DO recomputes a per-user **preference profile**: the centroid of all approved feature vectors and the centroid of all rejected ones. This is injected into the Coordinator's system prompt as a natural-language hint, e.g.:
+
+> User tends to approve when: priceTrend=0.62, ilPct=0.12 …  
+> User tends to reject when: priceTrend=0.31, ilPct=0.48 …
+
+### 4. Threshold calibration
+Once at least 10 scored decisions have accumulated, a **daily grid search** runs over `{minConfidence, cooldownSec, dailyTxCap}` × recent `score_24h` history to find the parameter combination that would have produced the highest mean outcome. The winning thresholds are stored in DO state and used by the Coordinator in place of the static `wrangler.toml` defaults.
+
+### Storage schema additions (migration `0004_learning.sql`)
+
+| Table | Purpose |
+|---|---|
+| `decision_contexts` | Feature vector + pool snapshot at decision time |
+| `outcomes` | 4 h / 24 h composite scores per decision |
+| `preferences` | Per-user Telegram feedback log |
+| `calibration_log` | Daily grid-search results per user |
