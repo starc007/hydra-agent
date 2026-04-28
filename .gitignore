@@ -6,7 +6,6 @@ node_modules
 .wrangler
 dist
 docs
-!docs/superpowers
 tsconfig.tsbuildinfo
 # foundry artifacts
 cache
