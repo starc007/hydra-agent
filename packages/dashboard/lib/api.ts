@@ -74,6 +74,14 @@ export async function forceAction(
   if (!res.ok) throw new Error(`force ${res.status}`);
 }
 
+export async function simulateEscalate(doId: string, sessionToken: string): Promise<void> {
+  const res = await fetch(`${BACKEND}/admin/simulate-escalate?do=${doId}`, {
+    method: 'POST',
+    headers: { 'x-hydra-session': sessionToken },
+  });
+  if (!res.ok) throw new Error(`simulateEscalate ${res.status}`);
+}
+
 export async function setRange(
   doId: string, sessionToken: string,
   range: { tickLower: number; tickUpper: number },

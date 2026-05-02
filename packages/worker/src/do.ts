@@ -508,6 +508,25 @@ export class HydraDO extends DurableObject<Env> {
     );
   }
 
+  async simulateEscalation(): Promise<void> {
+    await this.boot();
+    this.bus.emit(
+      newEvent({
+        source: 'coordinator',
+        type: 'ESCALATE',
+        payload: {
+          reason: 'Demo escalation triggered manually.',
+          correlatesTo: newId(),
+          recommendation: {
+            action: 'REBALANCE',
+            confidence: 0.72,
+            rationale: 'Demo escalation — simulated for testing.',
+          },
+        },
+      }),
+    );
+  }
+
   async snapshot() {
     await this.boot();
     const events = await listEvents(this.env.DB, this.doId, 100);

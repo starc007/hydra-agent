@@ -332,6 +332,16 @@ export default {
       return jsonResponse({ ok: true }, cors);
     }
 
+    // ── POST /admin/simulate-escalate ─────────────────────────────────────────
+    if (url.pathname === '/admin/simulate-escalate' && req.method === 'POST') {
+      if (!doId) return new Response('missing ?do', { status: 400, headers: cors });
+      const session = req.headers.get('x-hydra-session') ?? '';
+      const ok = await doStub(env, doId).verifySession(await sha256Hex(session));
+      if (!ok) return new Response('forbidden', { status: 403, headers: cors });
+      await doStub(env, doId).simulateEscalation();
+      return jsonResponse({ ok: true }, cors);
+    }
+
     // ── POST /admin/range ─────────────────────────────────────────────────────
     if (url.pathname === '/admin/range' && req.method === 'POST') {
       if (!doId) return new Response('missing ?do', { status: 400, headers: cors });
